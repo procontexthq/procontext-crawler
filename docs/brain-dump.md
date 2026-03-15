@@ -52,12 +52,12 @@ Define a `Repository` protocol: `save_job`, `get_job`, `enqueue_urls`, `mark_url
 - **Concurrency tuning**: Per-domain rate limiting and global concurrency caps. Don't hammer documentation sites.
 - **Incremental crawling**: Only re-crawl pages that changed since last crawl (ETags, Last-Modified, content hashing).
 
-### Open Questions
+### Resolved Questions
 
-- **Q1**: Should the library also work as a pure Python API (not just HTTP)? e.g., `crawler = Crawler(); results = await crawler.crawl(url, depth=2)`. This would make it easier to embed in other Python projects. Leaning yes.
-- **Q2**: How do we handle authentication for gated docs? Custom headers + cookies seem sufficient for v0.1. Full OAuth proxy is out of scope.
-- **Q3**: robots.txt — respect by default or opt-in? Most doc sites don't block crawlers, but it's good citizenship. Leaning: respect by default, with a flag to override.
-- **Q4**: Should we support non-documentation sites? The extractors could work on any website, but optimizing for docs (clean Markdown, structured headings) is the sweet spot. Leaning: build for docs, don't prevent general use.
+- **Q1**: Should the library also work as a pure Python API? **Yes** — library-first, server-second (Design Decision D8 in functional spec). `Crawler` class is the primary interface.
+- **Q2**: How do we handle authentication for gated docs? **v0.2** — custom headers, cookies, HTTP Basic Auth. Out of scope for v0.1.
+- **Q3**: robots.txt — respect by default or opt-in? **v0.2** — respect by default, with `respect_robots_txt: false` flag to override.
+- **Q4**: Should we support non-documentation sites? **Build for docs, don't prevent general use.** Extractors prefer `<main>`/`<article>` content, but work on any HTML.
 
 ---
 

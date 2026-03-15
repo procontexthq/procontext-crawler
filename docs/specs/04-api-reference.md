@@ -116,10 +116,10 @@ Content-Type: application/json
   "formats": ["markdown"],
   "render": false,
   "options": {
-    "includePatterns": ["https://docs.pydantic.dev/**"],
-    "excludePatterns": ["https://docs.pydantic.dev/blog/**"],
-    "includeSubdomains": false,
-    "includeExternalLinks": false
+    "include_patterns": ["https://docs.pydantic.dev/**"],
+    "exclude_patterns": ["https://docs.pydantic.dev/blog/**"],
+    "include_subdomains": false,
+    "include_external_links": false
   }
 }
 ```
@@ -134,14 +134,14 @@ Content-Type: application/json
 | `source` | string | No | `"links"` | URL discovery: `"links"`, `"llms_txt"`, `"sitemaps"` [v0.2], `"all"` [v0.2] |
 | `formats` | string[] | No | `["markdown"]` | Output formats: `"markdown"`, `"html"` |
 | `render` | boolean | No | `false` | Use Playwright rendering |
-| `gotoOptions.waitUntil` | string | No | `"load"` | Page load strategy (render only) |
-| `gotoOptions.timeout` | integer | No | 30000 | Navigation timeout in ms (render only) |
-| `waitForSelector` | string | No | — | CSS selector to wait for (render only) |
-| `rejectResourceTypes` | string[] | No | — | Resource types to block (render only) |
-| `options.includePatterns` | string[] | No | — | Wildcard URL include patterns |
-| `options.excludePatterns` | string[] | No | — | Wildcard URL exclude patterns |
-| `options.includeSubdomains` | boolean | No | `false` | Follow subdomain links |
-| `options.includeExternalLinks` | boolean | No | `false` | Follow cross-domain links |
+| `goto_options.wait_until` | string | No | `"load"` | Page load strategy (render only) |
+| `goto_options.timeout` | integer | No | 30000 | Navigation timeout in ms (render only) |
+| `wait_for_selector` | string | No | — | CSS selector to wait for (render only) |
+| `reject_resource_types` | string[] | No | — | Resource types to block (render only) |
+| `options.include_patterns` | string[] | No | — | Wildcard URL include patterns |
+| `options.exclude_patterns` | string[] | No | — | Wildcard URL exclude patterns |
+| `options.include_subdomains` | boolean | No | `false` | Follow subdomain links |
+| `options.include_external_links` | boolean | No | `false` | Follow cross-domain links |
 
 ### Response
 
@@ -182,9 +182,9 @@ curl -X POST http://localhost:8080/crawl \
     "url": "https://react.dev/learn",
     "limit": 20,
     "render": true,
-    "gotoOptions": {"waitUntil": "networkidle0"},
+    "goto_options": {"wait_until": "networkidle0"},
     "options": {
-      "includePatterns": ["https://react.dev/learn/**"]
+      "include_patterns": ["https://react.dev/learn/**"]
     }
   }'
 ```
@@ -361,10 +361,10 @@ Content-Type: application/json
 | `url` | string | Yes* | — | URL to fetch |
 | `html` | string | Yes* | — | Raw HTML to convert (alternative to `url`) |
 | `render` | boolean | No | `false` | Use Playwright rendering |
-| `gotoOptions.waitUntil` | string | No | `"load"` | Page load strategy (render only) |
-| `gotoOptions.timeout` | integer | No | 30000 | Navigation timeout in ms (render only) |
-| `waitForSelector` | string | No | — | CSS selector to wait for (render only) |
-| `rejectResourceTypes` | string[] | No | — | Resource types to block (render only) |
+| `goto_options.wait_until` | string | No | `"load"` | Page load strategy (render only) |
+| `goto_options.timeout` | integer | No | 30000 | Navigation timeout in ms (render only) |
+| `wait_for_selector` | string | No | — | CSS selector to wait for (render only) |
+| `reject_resource_types` | string[] | No | — | Resource types to block (render only) |
 
 \* Provide either `url` or `html`, not both.
 
@@ -402,8 +402,8 @@ curl -X POST http://localhost:8080/markdown \
   -d '{
     "url": "https://react.dev/learn",
     "render": true,
-    "gotoOptions": {"waitUntil": "networkidle0"},
-    "rejectResourceTypes": ["image", "font", "stylesheet"]
+    "goto_options": {"wait_until": "networkidle0"},
+    "reject_resource_types": ["image", "font", "stylesheet"]
   }'
 
 # From raw HTML
@@ -477,7 +477,7 @@ Content-Type: application/json
 {
   "url": "https://docs.pydantic.dev/concepts/models",
   "render": false,
-  "excludeExternalLinks": true
+  "exclude_external_links": true
 }
 ```
 
@@ -485,8 +485,8 @@ Content-Type: application/json
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `visibleLinksOnly` | boolean | No | `false` | Only visible links (render only) |
-| `excludeExternalLinks` | boolean | No | `false` | Filter out cross-domain links |
+| `visible_links_only` | boolean | No | `false` | Only visible links (render only) |
+| `exclude_external_links` | boolean | No | `false` | Filter out cross-domain links |
 
 ### Response
 
@@ -519,7 +519,7 @@ curl -X POST http://localhost:8080/links \
 # Get only same-domain links
 curl -X POST http://localhost:8080/links \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://docs.pydantic.dev/concepts/models", "excludeExternalLinks": true}'
+  -d '{"url": "https://docs.pydantic.dev/concepts/models", "exclude_external_links": true}'
 ```
 
 ---
@@ -702,9 +702,9 @@ Content-Type: application/json
 ```json
 {
   "url": "https://docs.pydantic.dev/concepts/models",
-  "screenshotOptions": {
+  "screenshot_options": {
     "type": "png",
-    "fullPage": true
+    "full_page": true
   },
   "viewport": {"width": 1920, "height": 1080}
 }
@@ -714,10 +714,10 @@ Content-Type: application/json
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `screenshotOptions.type` | string | No | `"png"` | `"png"` or `"jpeg"` |
-| `screenshotOptions.quality` | integer | No | — | JPEG quality (0-100) |
-| `screenshotOptions.fullPage` | boolean | No | `false` | Capture full scrollable page |
-| `screenshotOptions.clip` | object | No | — | Crop: `{x, y, width, height}` |
+| `screenshot_options.type` | string | No | `"png"` | `"png"` or `"jpeg"` |
+| `screenshot_options.quality` | integer | No | — | JPEG quality (0-100) |
+| `screenshot_options.full_page` | boolean | No | `false` | Capture full scrollable page |
+| `screenshot_options.clip` | object | No | — | Crop: `{x, y, width, height}` |
 | `viewport` | object | No | `{width: 1920, height: 1080}` | Browser viewport |
 | `selector` | string | No | — | Capture only this element |
 
@@ -735,7 +735,7 @@ Content-Type: image/png
 # Full-page screenshot
 curl -X POST http://localhost:8080/screenshot \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://docs.pydantic.dev", "screenshotOptions": {"fullPage": true}}' \
+  -d '{"url": "https://docs.pydantic.dev", "screenshot_options": {"full_page": true}}' \
   --output screenshot.png
 
 # Element screenshot
@@ -763,9 +763,9 @@ Content-Type: application/json
 ```json
 {
   "url": "https://docs.pydantic.dev/concepts/models",
-  "pdfOptions": {
+  "pdf_options": {
     "format": "a4",
-    "printBackground": true,
+    "print_background": true,
     "margin": {"top": "1cm", "bottom": "1cm", "left": "1cm", "right": "1cm"}
   }
 }
@@ -775,14 +775,14 @@ Content-Type: application/json
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `pdfOptions.format` | string | No | `"a4"` | Paper size |
-| `pdfOptions.landscape` | boolean | No | `false` | Landscape orientation |
-| `pdfOptions.scale` | number | No | 1.0 | Zoom level |
-| `pdfOptions.printBackground` | boolean | No | `false` | Include background |
-| `pdfOptions.margin` | object | No | — | `{top, bottom, left, right}` |
-| `pdfOptions.displayHeaderFooter` | boolean | No | `false` | Show header/footer |
-| `pdfOptions.headerTemplate` | string | No | — | HTML header template |
-| `pdfOptions.footerTemplate` | string | No | — | HTML footer template |
+| `pdf_options.format` | string | No | `"a4"` | Paper size |
+| `pdf_options.landscape` | boolean | No | `false` | Landscape orientation |
+| `pdf_options.scale` | number | No | 1.0 | Zoom level |
+| `pdf_options.print_background` | boolean | No | `false` | Include background |
+| `pdf_options.margin` | object | No | — | `{top, bottom, left, right}` |
+| `pdf_options.display_header_footer` | boolean | No | `false` | Show header/footer |
+| `pdf_options.header_template` | string | No | — | HTML header template |
+| `pdf_options.footer_template` | string | No | — | HTML footer template |
 
 ### Response
 
@@ -797,7 +797,7 @@ Content-Type: application/pdf
 ```bash
 curl -X POST http://localhost:8080/pdf \
   -H "Content-Type: application/json" \
-  -d '{"url": "https://docs.pydantic.dev/concepts/models", "pdfOptions": {"format": "a4"}}' \
+  -d '{"url": "https://docs.pydantic.dev/concepts/models", "pdf_options": {"format": "a4"}}' \
   --output page.pdf
 ```
 
@@ -1158,7 +1158,7 @@ proctx-crawler serve --port 3000 --host 0.0.0.0
 | `NOT_FOUND` | 404 | No | Target URL returned HTTP 404. | `/markdown`, `/content`, `/links`, `/scrape` |
 | `JOB_NOT_FOUND` | 404 | No | The specified job ID does not exist in the database. | `GET /crawl`, `DELETE /crawl` |
 | `RENDER_FAILED` | 502 | Yes | Playwright rendering failed: browser crash, navigation timeout, or page error. Only occurs when `render: true`. | Any (when render enabled) |
-| `INVALID_SELECTOR` | 400 | No | Invalid CSS selector syntax in `elements` or `waitForSelector`. | `/scrape`, any with `waitForSelector` |
+| `INVALID_SELECTOR` | 400 | No | Invalid CSS selector syntax in `elements` or `wait_for_selector`. | `/scrape`, any with `wait_for_selector` |
 | `DISALLOWED` | 403 | No | URL blocked by robots.txt. [v0.2] | `/crawl` |
 | `EXTRACTION_FAILED` | 502 | Yes | AI model returned an error or invalid response. [v0.3] | `/json` |
 

@@ -444,7 +444,12 @@ async def run_crawl(job: Job, repo: Repository, storage: ContentStorage):
 | `"sitemaps"` [v0.2] | Parse `sitemap.xml` from starting URL's domain | None — only sitemap URLs are crawled |
 | `"all"` [v0.2] | Sitemap URLs + starting URL | Parse `<a href>` from each crawled page (for pages not found via sitemap) |
 
-**llms.txt parsing**: The starting URL is fetched and parsed as a plain text file. Lines matching `- [text](url)` or bare `https://` URLs are extracted as documentation links. All extracted URLs become seed entries in the queue at depth 0.
+**llms.txt parsing**: The starting URL is fetched and parsed as a plain text file. The parser extracts all HTTP(S) URLs found in the file using two strategies:
+
+1. **Markdown links**: `[text](url)` or `- [text](url)` — extract the URL from the parentheses
+2. **Bare URLs**: Lines containing `https://...` or `http://...` — extract the URL (terminated by whitespace, `>`, `)`, or end-of-line)
+
+The parser is intentionally lenient — real-world llms.txt files vary in structure. Section headers and descriptive text are ignored; only URLs are extracted. All extracted URLs become seed entries in the queue at depth 0. Duplicate URLs are deduplicated before enqueuing.
 
 **Link discovery from HTML**: After fetching a page, all `<a href="...">` elements are extracted. Relative URLs are resolved to absolute using the page's base URL. Fragment-only links (`#section`) are discarded. Each discovered URL goes through the pattern matching and domain filtering pipeline before being enqueued.
 
@@ -566,21 +571,77 @@ async def fetch_static(url: str, *, timeout: float = 30.0) -> FetchResult:
 
 ### 5.2 Playwright Renderer
 
-Used when `render: true`. Launches a Chromium browser, navigates to the URL, executes JavaScript, and captures the rendered DOM.
+Used when `render: true`. Uses a shared browser pool to avoid launching Chromium on every fetch. Each fetch gets a fresh `BrowserContext` for isolation.
+
+#### 5.2.1 Browser Pool
+
+The `BrowserPool` manages a single long-lived Chromium instance shared across all crawl jobs and single-page requests. Each fetch acquires a `BrowserContext` (cheap — ~10ms), uses it, and closes it. The browser is launched lazily on first use.
+
+```python
+# core/browser_pool.py
+
+class BrowserPool:
+    def __init__(self, *, headless: bool = True):
+        self._headless = headless
+        self._playwright: Playwright | None = None
+        self._browser: Browser | None = None
+        self._lock = anyio.Lock()
+
+    async def start(self) -> None:
+        """Launch the browser. Called once during application startup."""
+        self._playwright = await async_playwright().start()
+        self._browser = await self._playwright.chromium.launch(headless=self._headless)
+
+    async def stop(self) -> None:
+        """Close the browser and Playwright. Called during shutdown."""
+        if self._browser:
+            await self._browser.close()
+        if self._playwright:
+            await self._playwright.stop()
+        self._browser = None
+        self._playwright = None
+
+    async def _ensure_browser(self) -> Browser:
+        """Relaunch the browser if it crashed."""
+        async with self._lock:
+            if self._browser is None or not self._browser.is_connected():
+                if self._playwright is None:
+                    self._playwright = await async_playwright().start()
+                self._browser = await self._playwright.chromium.launch(headless=self._headless)
+            return self._browser
+
+    @asynccontextmanager
+    async def acquire_context(self) -> AsyncIterator[BrowserContext]:
+        """Acquire a fresh BrowserContext. Automatically closed on exit."""
+        browser = await self._ensure_browser()
+        context = await browser.new_context()
+        try:
+            yield context
+        finally:
+            await context.close()
+```
+
+**Key properties**:
+
+- **Lazy start**: The browser is launched on `start()` or on first use via `_ensure_browser()`.
+- **Crash recovery**: If the browser process dies (detected via `is_connected()`), `_ensure_browser()` relaunches it transparently. A lock prevents multiple concurrent relaunches.
+- **Context isolation**: Each fetch gets a new `BrowserContext` — separate cookies, localStorage, cache. No state leaks between fetches.
+- **Lifecycle**: Created once during application startup (in the FastAPI lifespan or `Crawler.__aenter__`). Closed during shutdown.
+
+#### 5.2.2 Rendered Fetch
 
 ```python
 # core/renderer.py
 
 async def fetch_rendered(
     url: str,
+    pool: BrowserPool,
     *,
     goto_options: GotoOptions | None = None,
     wait_for_selector: str | None = None,
     reject_resource_types: list[str] | None = None,
 ) -> FetchResult:
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context()
+    async with pool.acquire_context() as context:
         page = await context.new_page()
 
         # Block unwanted resource types (images, fonts, etc.)
@@ -596,7 +657,6 @@ async def fetch_rendered(
             await page.wait_for_selector(wait_for_selector, timeout=timeout)
 
         html = await page.content()
-        await browser.close()
 
         return FetchResult(
             url=page.url,
@@ -605,8 +665,6 @@ async def fetch_rendered(
             headers={},
         )
 ```
-
-**Browser lifecycle**: In v0.1, a new browser instance is created per fetch. In v0.2+, a shared browser pool will be introduced to amortise launch cost across multiple pages in a crawl job.
 
 **Resource blocking**: The `reject_resource_types` parameter maps to Playwright's route interception. Blocking images, fonts, and stylesheets dramatically speeds up rendering when only text content is needed.
 
@@ -881,9 +939,63 @@ class ContentStorage:
             return path.read_text(encoding="utf-8")
         return None
 
-    async def write_manifest(self, job_id: str) -> None:
+    async def write_manifest(self, job_id: str, job: Job, records: list[UrlRecord]) -> None:
         """Write manifest.json mapping url_hash → original URL + metadata."""
-        ...
+        manifest = {
+            "job_id": job.id,
+            "status": job.status,
+            "url": job.url,
+            "created_at": job.created_at.isoformat(),
+            "finished_at": job.finished_at.isoformat() if job.finished_at else None,
+            "config": job.config.model_dump(),
+            "total": job.total,
+            "finished": job.finished,
+            "pages": {
+                self.url_hash(r.url): {
+                    "url": r.url,
+                    "status": r.status,
+                    "http_status": r.http_status,
+                    "title": r.title,
+                    "content_hash": r.content_hash,
+                    "files": {
+                        "markdown": f"{self.url_hash(r.url)}.md",
+                        "html": f"{self.url_hash(r.url)}.html",
+                    },
+                }
+                for r in records
+                if r.status == UrlStatus.COMPLETED
+            },
+        }
+        path = self.job_dir(job_id) / "manifest.json"
+        path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+```
+
+**manifest.json schema**:
+
+```json
+{
+  "job_id": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "completed",
+  "url": "https://docs.pydantic.dev/llms.txt",
+  "created_at": "2026-03-16T10:00:00+00:00",
+  "finished_at": "2026-03-16T10:05:32+00:00",
+  "config": { "limit": 50, "depth": 1000, "source": "llms_txt", "..." : "..." },
+  "total": 50,
+  "finished": 50,
+  "pages": {
+    "a1b2c3d4e5f67890": {
+      "url": "https://docs.pydantic.dev/concepts/models",
+      "status": "completed",
+      "http_status": 200,
+      "title": "Models - Pydantic",
+      "content_hash": "sha256:abcdef1234567890...",
+      "files": {
+        "markdown": "a1b2c3d4e5f67890.md",
+        "html": "a1b2c3d4e5f67890.html"
+      }
+    }
+  }
+}
 ```
 
 **File layout** (from functional spec Section 9.1):
@@ -988,7 +1100,7 @@ Pages fetched by the crawler can be cached to avoid re-fetching within a TTL.
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `maxAge` | 86400 (24h) | Cache TTL in seconds |
+| `max_age` | 86400 (24h) | Cache TTL in seconds |
 
 **Cache key**: SHA-256 of the normalised URL.
 
@@ -1013,10 +1125,10 @@ Within a single crawl job, content deduplication is handled by the visited set (
 
 ### 9.3 Incremental Crawling
 
-The `modifiedSince` parameter (v0.2) allows skipping pages that haven't changed since a given timestamp. Implementation:
+The `modified_since` parameter (v0.2) allows skipping pages that haven't changed since a given timestamp. Implementation:
 
 1. Before fetching, check the cache for a prior fetch of this URL
-2. If the cached `fetched_at` is after `modifiedSince`, use the cached version
+2. If the cached `fetched_at` is after `modified_since`, use the cached version
 3. Optionally, send `If-Modified-Since` headers to the target server
 
 ---
@@ -1038,9 +1150,12 @@ async def lifespan(app: FastAPI):
     repo = SQLiteRepository(settings.db_path)
     await repo.initialise()
     storage = ContentStorage(settings.output_dir)
+    browser_pool = BrowserPool(headless=settings.playwright_headless)
+    await browser_pool.start()
 
     app.state.repo = repo
     app.state.storage = storage
+    app.state.browser_pool = browser_pool
     app.state.settings = settings
     app.state.task_group = anyio.create_task_group()
 
@@ -1048,6 +1163,7 @@ async def lifespan(app: FastAPI):
         yield
 
     # Shutdown
+    await browser_pool.stop()
     await repo.close()
 
 app = FastAPI(title="ProContext Crawler", lifespan=lifespan)
@@ -1229,6 +1345,8 @@ Commands:
 **Implementation**: `argparse` (stdlib). No external CLI framework dependency.
 
 **Entry point**: `src/proctx_crawler/cli.py:main()`, registered as `proctx-crawler` in `pyproject.toml`.
+
+**Default behaviour**: Running `proctx-crawler` with no subcommand prints the help message and exits with code 0.
 
 **Command details**:
 

@@ -119,11 +119,11 @@ Polish, resilience, and new extraction capabilities.
 - Auto-detect JS rendering (static fetch → detect JS shell → auto-retry with Playwright)
 - robots.txt compliance (respect by default, flag to override)
 - Per-domain rate limiting (configurable delay between requests to same host)
-- Authentication to target sites (`authenticate`, `cookies`, `setExtraHTTPHeaders`)
-- Page caching with configurable TTL (`maxAge`)
+- Authentication to target sites (`authenticate`, `cookies`, `set_extra_http_headers`)
+- Page caching with configurable TTL (`max_age`)
 - Content deduplication (skip identical pages)
 - Metadata extraction per page (title, canonical URL, HTTP status, content hash)
-- Incremental crawling (`modifiedSince` — skip unmodified pages)
+- Incremental crawling (`modified_since` — skip unmodified pages)
 - Sitemap discovery (`source: "sitemaps"`)
 - CSS selector-based element extraction (`/scrape` endpoint)
 
@@ -141,7 +141,7 @@ Advanced features for specialized use cases.
 - Streaming results (SSE for real-time crawl progress)
 - Export (zip/tar download of crawl output)
 - Webhook callbacks on job completion
-- Request pattern filtering (`rejectRequestPattern`, `allowRequestPattern`)
+- Request pattern filtering (`reject_request_pattern`, `allow_request_pattern`)
 - Pluggable extractors (custom HTML-to-Markdown pipelines)
 
 ---
@@ -230,10 +230,10 @@ Only apply when `render: true`. Ignored when `render: false`.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `gotoOptions.waitUntil` | string | No | `"load"` | Page load strategy: `"load"`, `"domcontentloaded"`, `"networkidle0"` (no connections for 500ms), `"networkidle2"` (≤2 connections for 500ms). |
-| `gotoOptions.timeout` | integer | No | 30000 | Navigation timeout in milliseconds. |
-| `waitForSelector` | string | No | — | CSS selector to wait for before extracting content. Useful for SPAs where content loads asynchronously. |
-| `rejectResourceTypes` | array | No | — | Resource types to block: `"image"`, `"media"`, `"font"`, `"stylesheet"`. Speeds up rendering by skipping unnecessary resources. |
+| `goto_options.wait_until` | string | No | `"load"` | Page load strategy: `"load"`, `"domcontentloaded"`, `"networkidle0"` (no connections for 500ms), `"networkidle2"` (≤2 connections for 500ms). |
+| `goto_options.timeout` | integer | No | 30000 | Navigation timeout in milliseconds. |
+| `wait_for_selector` | string | No | — | CSS selector to wait for before extracting content. Useful for SPAs where content loads asynchronously. |
+| `reject_resource_types` | array | No | — | Resource types to block: `"image"`, `"media"`, `"font"`, `"stylesheet"`. Speeds up rendering by skipping unnecessary resources. |
 
 ### 6.3 Authentication Parameters [v0.2]
 
@@ -243,8 +243,8 @@ For fetching gated or authenticated content. Apply to both static and rendered f
 |-----------|------|----------|---------|-------------|
 | `authenticate` | object | No | — | HTTP Basic Auth credentials: `{"username": "...", "password": "..."}`. |
 | `cookies` | array | No | — | Cookies to set before loading. Each entry: `{"name": "...", "value": "...", "domain": "...", "path": "/"}`. |
-| `setExtraHTTPHeaders` | object | No | — | Custom HTTP headers for the request (e.g., `{"Authorization": "Bearer ..."}` for token-based auth). |
-| `userAgent` | string | No | — | Custom User-Agent string. Note: does not bypass bot detection. |
+| `set_extra_http_headers` | object | No | — | Custom HTTP headers for the request (e.g., `{"Authorization": "Bearer ..."}` for token-based auth). |
+| `user_agent` | string | No | — | Custom User-Agent string. Note: does not bypass bot detection. |
 
 ---
 
@@ -264,13 +264,13 @@ For fetching gated or authenticated content. Apply to both static and rendered f
 | `source` | string | No | `"links"` | URL discovery strategy: `"links"`, `"llms_txt"`, `"sitemaps"` [v0.2], `"all"` [v0.2]. |
 | `formats` | array | No | `["markdown"]` | Output formats per page: `"markdown"`, `"html"`. `"json"` added in v0.3. |
 | `render` | boolean | No | `false` | Use Playwright for all pages in this crawl. |
-| `gotoOptions` | object | No | — | Rendering params (see Section 6.2). Apply to all pages when `render: true`. |
-| `waitForSelector` | string | No | — | CSS selector to wait for on each page (see Section 6.2). |
-| `rejectResourceTypes` | array | No | — | Resource types to block (see Section 6.2). |
-| `options.includePatterns` | array | No | — | Wildcard URL patterns to include. |
-| `options.excludePatterns` | array | No | — | Wildcard URL patterns to exclude. **Exclude always wins over include.** |
-| `options.includeSubdomains` | boolean | No | `false` | Follow links to subdomains of the starting URL's domain. |
-| `options.includeExternalLinks` | boolean | No | `false` | Follow links to external domains. |
+| `goto_options` | object | No | — | Rendering params (see Section 6.2). Apply to all pages when `render: true`. |
+| `wait_for_selector` | string | No | — | CSS selector to wait for on each page (see Section 6.2). |
+| `reject_resource_types` | array | No | — | Resource types to block (see Section 6.2). |
+| `options.include_patterns` | array | No | — | Wildcard URL patterns to include. |
+| `options.exclude_patterns` | array | No | — | Wildcard URL patterns to exclude. **Exclude always wins over include.** |
+| `options.include_subdomains` | boolean | No | `false` | Follow links to subdomains of the starting URL's domain. |
+| `options.include_external_links` | boolean | No | `false` | Follow links to external domains. |
 
 **URL discovery sources**:
 
@@ -439,8 +439,8 @@ The `result` is the job ID (UUID). Use it with `GET /crawl` to poll.
 
 **Notes**:
 
-- For JavaScript-heavy pages, set `render: true` and consider `gotoOptions.waitUntil: "networkidle0"` or `waitForSelector` to ensure content has loaded before extraction.
-- Blocking images, media, and fonts via `rejectResourceTypes` significantly speeds up Playwright rendering when only text content is needed.
+- For JavaScript-heavy pages, set `render: true` and consider `goto_options.wait_until: "networkidle0"` or `wait_for_selector` to ensure content has loaded before extraction.
+- Blocking images, media, and fonts via `reject_resource_types` significantly speeds up Playwright rendering when only text content is needed.
 
 ---
 
@@ -474,15 +474,15 @@ The `result` is the job ID (UUID). Use it with `GET /crawl` to poll.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `visibleLinksOnly` | boolean | No | `false` | Return only user-visible links (skip hidden elements). Only effective when `render: true`. |
-| `excludeExternalLinks` | boolean | No | `false` | Filter out cross-domain links. |
+| `visible_links_only` | boolean | No | `false` | Return only user-visible links (skip hidden elements). Only effective when `render: true`. |
+| `exclude_external_links` | boolean | No | `false` | Filter out cross-domain links. |
 
 **Processing**:
 
 1. Fetch the page (static or Playwright depending on `render`)
 2. Parse all `<a href="...">` elements
 3. Resolve relative URLs to absolute
-4. Apply filters (`visibleLinksOnly`, `excludeExternalLinks`)
+4. Apply filters (`visible_links_only`, `exclude_external_links`)
 5. Deduplicate and return
 
 **Output**:
@@ -577,10 +577,10 @@ The `result` is the job ID (UUID). Use it with `GET /crawl` to poll.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `screenshotOptions.type` | string | No | `"png"` | Image format: `"png"` or `"jpeg"`. |
-| `screenshotOptions.quality` | integer | No | — | JPEG quality (0-100). Only valid with `type: "jpeg"`. |
-| `screenshotOptions.fullPage` | boolean | No | `false` | Capture the full scrollable page. |
-| `screenshotOptions.clip` | object | No | — | Crop region: `{x, y, width, height}`. |
+| `screenshot_options.type` | string | No | `"png"` | Image format: `"png"` or `"jpeg"`. |
+| `screenshot_options.quality` | integer | No | — | JPEG quality (0-100). Only valid with `type: "jpeg"`. |
+| `screenshot_options.full_page` | boolean | No | `false` | Capture the full scrollable page. |
+| `screenshot_options.clip` | object | No | — | Crop region: `{x, y, width, height}`. |
 | `viewport` | object | No | `{width: 1920, height: 1080}` | Browser viewport dimensions. |
 | `selector` | string | No | — | CSS selector — capture only this element. |
 
@@ -596,14 +596,14 @@ The `result` is the job ID (UUID). Use it with `GET /crawl` to poll.
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `pdfOptions.format` | string | No | `"a4"` | Paper size: `"a4"`, `"a5"`, `"letter"`, etc. |
-| `pdfOptions.landscape` | boolean | No | `false` | Landscape orientation. |
-| `pdfOptions.scale` | number | No | 1.0 | Zoom level. |
-| `pdfOptions.printBackground` | boolean | No | `false` | Include background colors/images. |
-| `pdfOptions.margin` | object | No | — | Page margins: `{top, bottom, left, right}`. |
-| `pdfOptions.displayHeaderFooter` | boolean | No | `false` | Show header and footer. |
-| `pdfOptions.headerTemplate` | string | No | — | HTML header template. |
-| `pdfOptions.footerTemplate` | string | No | — | HTML footer template. |
+| `pdf_options.format` | string | No | `"a4"` | Paper size: `"a4"`, `"a5"`, `"letter"`, etc. |
+| `pdf_options.landscape` | boolean | No | `false` | Landscape orientation. |
+| `pdf_options.scale` | number | No | 1.0 | Zoom level. |
+| `pdf_options.print_background` | boolean | No | `false` | Include background colors/images. |
+| `pdf_options.margin` | object | No | — | Page margins: `{top, bottom, left, right}`. |
+| `pdf_options.display_header_footer` | boolean | No | `false` | Show header and footer. |
+| `pdf_options.header_template` | string | No | — | HTML header template. |
+| `pdf_options.footer_template` | string | No | — | HTML footer template. |
 
 **Output**: Binary PDF data.
 
@@ -740,7 +740,7 @@ All error responses follow this structure:
 | `NOT_FOUND` | `/markdown`, `/content`, `/links`, `/scrape`, `/crawl` | `false` | HTTP 404 — page does not exist. |
 | `JOB_NOT_FOUND` | `GET /crawl`, `DELETE /crawl` | `false` | Job ID does not exist. |
 | `RENDER_FAILED` | Any (when `render: true`) | `true` | Playwright rendering failed (browser crash, timeout, etc.). |
-| `INVALID_SELECTOR` | `/scrape`, single-page with `waitForSelector` | `false` | CSS selector is invalid. |
+| `INVALID_SELECTOR` | `/scrape`, single-page with `wait_for_selector` | `false` | CSS selector is invalid. |
 | `DISALLOWED` | `/crawl` [v0.2] | `false` | URL blocked by robots.txt. |
 | `EXTRACTION_FAILED` | `/json` [v0.3] | `true` | AI extraction failed (model error, invalid response). |
 

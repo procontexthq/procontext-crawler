@@ -89,6 +89,7 @@ src/proctx_crawler/
         __init__.py
         fetcher.py                  # Static httpx fetcher — Phase 2
         renderer.py                 # Playwright renderer — Phase 2
+        browser_pool.py             # Shared Chromium browser pool — Phase 2
         ssrf.py                     # SSRF validation — Phase 2
         engine.py                   # BFS crawl engine — Phase 6
         url_utils.py                # URL normalisation, pattern matching — Phase 1
@@ -120,6 +121,7 @@ tests/
         test_url_utils.py           # URL normalisation, pattern matching — Phase 1
         test_ssrf.py                # SSRF validation — Phase 2
         test_fetcher.py             # Static fetcher (mocked) — Phase 2
+        test_browser_pool.py        # Browser pool lifecycle, crash recovery — Phase 2
         test_renderer.py            # Playwright renderer (mocked) — Phase 2
         test_markdown_extractor.py  # HTML-to-Markdown — Phase 3
         test_link_extractor.py      # Link extraction — Phase 3
@@ -215,7 +217,8 @@ Phase 1: Foundation (models, config, logging, url_utils)
 |------|--------------|
 | `core/ssrf.py` | `validate_url_scheme()`, `resolve_and_check_ip()`, `is_private_ip()`. IPv4 and IPv6 blocklists. |
 | `core/fetcher.py` | `FetchResult` model, `fetch_static()` with httpx, manual redirect handling with SSRF re-check per hop, response size limit, configurable timeout |
-| `core/renderer.py` | `fetch_rendered()` with Playwright, `gotoOptions`, `waitForSelector`, `rejectResourceTypes`, resource blocker route handler |
+| `core/browser_pool.py` | `BrowserPool` class — `start()`, `stop()`, `acquire_context()` context manager, crash recovery via `_ensure_browser()`, `anyio.Lock` for concurrent relaunch protection |
+| `core/renderer.py` | `fetch_rendered()` taking a `BrowserPool`, acquires context, `goto_options`, `wait_for_selector`, `reject_resource_types`, resource blocker route handler |
 
 **Tests**:
 
@@ -223,9 +226,10 @@ Phase 1: Foundation (models, config, logging, url_utils)
 |-----------|----------|
 | `test_ssrf.py` | Private IPs (127.x, 10.x, 172.16.x, 192.168.x, ::1, fc00::, 169.254.x, 100.64.x), public IPs pass, scheme validation, edge cases (IPv6 mapped IPv4) |
 | `test_fetcher.py` | Happy path (mocked httpx via respx), redirect following with SSRF re-check, response size limit enforcement, timeout handling, error classification (404, 500, timeout) |
-| `test_renderer.py` | Mocked Playwright (or skip if Playwright not installed), resource blocking, wait_for_selector, goto_options |
+| `test_browser_pool.py` | Start/stop lifecycle, acquire_context returns isolated context, crash recovery (mock `is_connected()` returning False → relaunch), concurrent acquire calls |
+| `test_renderer.py` | Mocked BrowserPool, resource blocking, wait_for_selector, goto_options |
 
-**Definition of done**: `fetch_static("https://example.com")` returns HTML. SSRF blocks `http://127.0.0.1`. Redirects are followed with re-validation. `fetch_rendered()` works with Playwright headless Chromium.
+**Definition of done**: `fetch_static("https://example.com")` returns HTML. SSRF blocks `http://127.0.0.1`. Redirects are followed with re-validation. `BrowserPool` starts, serves contexts, and recovers from crashes. `fetch_rendered()` works through the pool.
 
 ---
 

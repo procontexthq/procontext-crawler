@@ -151,9 +151,9 @@ This document identifies threats arising from these characteristics and defines 
 | **Headless mode** | v0.1 | Always run Playwright in headless mode. No display server, smaller attack surface. |
 | **Chromium auto-update** | v0.1 | Playwright bundles Chromium. Running `playwright install` fetches the latest supported version. Keep Playwright dependency up to date. |
 | **Resource blocking** | v0.1 | Block unnecessary resource types (`image`, `media`, `font`, `stylesheet`) to reduce the amount of untrusted content the browser processes. |
-| **Context isolation** | v0.1 | Each fetch uses a fresh browser context. No cookies, storage, or state leaks between fetches. |
+| **Context isolation** | v0.1 | Each fetch uses a fresh `BrowserContext` via the browser pool. No cookies, storage, or state leaks between fetches. |
 | **Navigation timeout** | v0.1 | Hard timeout (default: 30s) on all Playwright navigations. Prevents pages from holding the browser open indefinitely. |
-| **No persistent browser** | v0.1 | In v0.1, a new browser instance is launched per fetch and closed immediately after. No long-lived browser process. |
+| **Browser crash recovery** | v0.1 | The browser pool detects a crashed browser via `is_connected()` and relaunches automatically. A lock prevents concurrent relaunches. |
 
 **Residual risk**: Chromium zero-days exist. The crawler runs untrusted JavaScript. This is an inherent risk of browser-based rendering. Users handling highly adversarial targets should run the crawler in a container or VM.
 
@@ -184,7 +184,7 @@ This document identifies threats arising from these characteristics and defines 
 | Control | Phase | Description |
 |---------|-------|-------------|
 | **No credential logging** | v0.1 | structlog processors strip `Authorization` headers, `api_key`, and `password` fields from log output. |
-| **Credentials not stored in DB** | v0.2 | Target site credentials (`authenticate`, `cookies`, `setExtraHTTPHeaders`) are used for the current request only. They are NOT persisted in the job configuration stored in SQLite. |
+| **Credentials not stored in DB** | v0.2 | Target site credentials (`authenticate`, `cookies`, `set_extra_http_headers`) are used for the current request only. They are NOT persisted in the job configuration stored in SQLite. |
 | **API key comparison** | v0.1 | Use constant-time comparison for API key validation to prevent timing attacks. |
 | **Error message sanitisation** | v0.1 | Error responses never include credentials. URL parameters that might contain tokens are stripped from error messages. |
 
@@ -214,7 +214,7 @@ This document identifies threats arising from these characteristics and defines 
 | Control | Phase | Description |
 |---------|-------|-------------|
 | **robots.txt compliance** | v0.2 | Fetch and respect robots.txt before crawling each domain. Disallowed URLs get `status: "disallowed"`. |
-| **Override flag** | v0.2 | A `respectRobotsTxt: false` flag allows users to opt out (e.g., crawling their own sites). |
+| **Override flag** | v0.2 | A `respect_robots_txt: false` flag allows users to opt out (e.g., crawling their own sites). |
 | **User-Agent identification** | v0.1 | The default User-Agent (`proctx-crawler/<version>`) identifies the crawler to site operators. |
 
 **Residual risk**: v0.1 does not enforce robots.txt. Users are responsible for only crawling sites they are authorised to access. The primary target audience (documentation sites) rarely blocks crawlers.
