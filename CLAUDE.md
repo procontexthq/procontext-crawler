@@ -1,0 +1,127 @@
+# Development Guidelines
+
+This document contains critical information about working with this codebase. Follow these guidelines precisely.
+
+## About the Project
+
+ProContext Crawler is a self-hosted crawl API for extracting structured documentation from websites. Given a starting URL, it discovers linked pages, fetches them with optional JavaScript rendering via Playwright, and returns clean Markdown, HTML, or structured JSON.
+
+## Project Motivation
+
+ProContext needs a reliable way to crawl and extract documentation from library websites. Many documentation sites use JavaScript-heavy frameworks (Next.js, Docusaurus, etc.) that require a real browser to render. This crawler provides a Cloudflare-style crawl API that handles both static and dynamic pages, producing clean Markdown suitable for LLM consumption. Even though the initial motivation was to fetch documentation for the ProContext ecosystem, this project has been designed to support multiple use cases beyond that.
+
+## Git Operations Policy
+
+**NEVER commit and push changes without explicit user approval.**
+
+You must:
+
+1. Wait for the user to explicitly ask you to commit and push any changes made to the documentation or code.
+2. If you believe a commit is necessary, ask first and wait for the user's response.
+3. NEVER ever mention a `co-authored-by` or similar aspects. In particular, never mention the tool used to create the commit message or PR.
+4. **Commit by intent**. If something is a coherent unit (a feature, fix, refactor, doc update), it deserves its own commit.
+5. Commit only the changes relevant to the current session.
+6. **Run all checks before pushing**
+   ```bash
+   uv run ruff check src/ tests/
+   uv run ruff format src/ tests/
+   uv run pyright src/
+   uv run pytest --cov=src/proctx_crawler --cov-fail-under=90
+   ```
+
+## Specifications
+
+Spec documents are in `docs/specs/` — read the relevant one before making changes. These are the authoritative design documents for this repo.
+
+**Document everything** — follow a document-first approach. Every feature, design decision, and architectural choice must be reflected in the specs.
+
+## Commands
+
+```bash
+# Install dependencies and create virtualenv
+uv sync --dev
+
+# Run the API server
+uv run proctx-crawler
+
+# Lint
+uv run ruff check src/
+
+# Format
+uv run ruff format src/
+
+# Type check
+uv run pyright src/
+
+# Run tests
+uv run pytest
+```
+
+## Architecture
+
+**Layered design** — API layer (FastAPI) → Core business logic → Extractors. Core modules have zero framework imports.
+
+**Job-based crawling** — POST creates a job, GET polls status/results, DELETE cancels. Jobs run asynchronously with configurable depth, page limits, and URL filters.
+
+**Dual fetch modes** — Static fetcher (httpx, fast) and browser renderer (Playwright, for JS-heavy pages). The `render` flag controls which path is used.
+
+**SQLite cache** — WAL mode for concurrent reads. Configurable TTL. Shared across jobs.
+
+## Coding Conventions
+
+**Logging**
+
+- Use structlog for all runtime logging — never the stdlib `logging` module directly, and never `print()`.
+
+**Platform-aware paths**
+
+- All filesystem defaults use `platformdirs` — never hardcode Unix paths.
+
+**Annotations and TYPE_CHECKING**
+
+- This project uses **pyright** (not mypy). Standard mode is enforced.
+- Type hints required for all code.
+- All modules use `from __future__ import annotations`. Imports only needed for type annotations go inside `if TYPE_CHECKING:` blocks.
+
+## Non-obvious Coding Guidelines
+
+This project follows the same coding guidelines as ProContext.
+
+See [`docs/coding-guidelines.md`](docs/coding-guidelines.md) for the full list.
+
+## Changelog Maintenance
+
+`CHANGELOG.md` is maintained via the `/changelog-release` skill.
+
+## Testing Requirements
+
+- After making changes, run linting, formatting, type checks, and pytest to verify the codebase is clean and all tests pass.
+- Framework: `uv run --frozen pytest`
+- Async testing: use anyio, not asyncio
+- Coverage: test edge cases and errors
+- New features require tests
+- Bug fixes require regression tests
+- Before pushing, verify highest possible branch coverage on changed files by running
+  `uv run --frozen pytest -x` (coverage is configured in `pyproject.toml` with `fail_under = 90`
+  and `branch = true`).
+- Avoid `anyio.sleep()` with a fixed duration to wait for async operations. Instead:
+  - Use `anyio.Event` — set it in the callback/handler, `await event.wait()` in the test
+  - For stream messages, use `await stream.receive()` instead of `sleep()` + `receive_nowait()`
+  - Exception: `sleep()` is appropriate when testing time-based features (e.g., timeouts)
+- Wrap indefinite waits (`event.wait()`, `stream.receive()`) in `anyio.fail_after(5)` to prevent hangs
+- **Failing tests are signals, not obstacles.** When a code change causes existing tests to fail, do not modify the test to make it pass without first understanding *why* it failed. A failing test may indicate a real bug in the change, an unintended behavioral shift, or a violated contract. Investigate the root cause, explain it to the user, and agree on the right fix before proceeding. Only update a test without consulting the user when the change is unambiguously correct (e.g., the test asserts on a renamed field that you just renamed).
+
+
+## Updates to CLAUDE.md
+
+_Only add what Claude cannot infer from reading the code._
+
+| Include in this section                              | Do NOT include                                     |
+| ---------------------------------------------------- | -------------------------------------------------- |
+| Bash commands Claude can't guess                     | Anything Claude can figure out by reading code     |
+| Code style rules that differ from defaults           | Standard language conventions Claude already knows |
+| Testing instructions and preferred test runners      | Detailed API documentation (link to docs instead)  |
+| Repository etiquette (branch naming, PR conventions) | Information that changes frequently                |
+| Architectural decisions specific to this project     | Long explanations or tutorials                     |
+| Developer environment quirks (required env vars)     | File-by-file descriptions of the codebase          |
+| Common gotchas or non-obvious behaviors              | Self-evident practices like "write clean code"     |
