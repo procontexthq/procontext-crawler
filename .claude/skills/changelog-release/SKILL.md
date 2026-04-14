@@ -1,7 +1,7 @@
 ---
 name: changelog-release
 description: "Maintain CHANGELOG.md. No args: populate [Unreleased] from commits since last tag (run after committing). With a version (e.g. 0.2.0): finalize [Unreleased] into a versioned release section."
-argument-hint: "[version — e.g. 0.2.0, or leave blank to populate Unreleased]"
+argument-hint: "[version — e.g. 0.2.0 (or auto for automatic versioning), or leave blank to populate Unreleased]"
 user-invokable: true
 ---
 
@@ -42,8 +42,15 @@ Rules:
 ## Mode 2 — Write release section (version argument given, e.g. `0.2.0`)
 
 - Rename `## [Unreleased]` to `## [<version>] - <today's date>`
+- If a version argument is supplied, run `uv run semantic-release version --print`
+  to get the authoritative next version. If the argument doesn't match, stop and
+  warn. This is the single source of truth — do not guess from commit prefixes.
+- If the version argument is `auto`, run `uv run semantic-release version --print`
+  and use the returned version.
 - Insert a fresh empty `## [Unreleased]` section above it (no subsections)
 - Update the comparison links at the bottom of the file:
   - Update the `[Unreleased]` link to compare from the new tag: `v<version>...HEAD`
   - Add a new versioned link `[<version>]: .../compare/v<prev-tag>...v<version>` where `<prev-tag>` is the last release tag shown above
 - Do not modify the content of any sections — only rename, reorder, and update links
+- Do not modify `pyproject.toml`, tags, or release workflow files. Only update
+  `CHANGELOG.md`.

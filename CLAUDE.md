@@ -17,23 +17,28 @@ ProContext needs a reliable way to crawl and extract documentation from library 
 You must:
 
 1. Wait for the user to explicitly ask you to commit and push any changes made to the documentation or code.
-2. If you believe a commit is necessary, ask first and wait for the user's response.
+2. If you believe a commit is necessary, you can say "I think we should commit these changes. Should I commit and push them?" and wait for the user's response.
 3. NEVER ever mention a `co-authored-by` or similar aspects. In particular, never mention the tool used to create the commit message or PR.
-4. **Commit by intent**. If something is a coherent unit (a feature, fix, refactor, doc update), it deserves its own commit.
-5. Commit only the changes relevant to the current session.
-6. **Run all checks before pushing**
+4. **Commit by intent**. If something is a coherent unit (a feature, fix, refactor, doc update), it deserves its own commit. Avoid these two extremes:
+   - ❌ One giant commit/day: hard to review, hard to revert, hard to bisect.
+   - ❌ A commit for every tiny edit: noise, harder to understand history.
+5. Make a branch for features, refactors, experiments, migrations, or anything that may take more than one sitting.
+6. Commit only the changes relevant to the current session. If there are other pending changes, ask the user whether you should commit them as well.
+7. **Run all checks before pushing**
    ```bash
    uv run ruff check src/ tests/
    uv run ruff format src/ tests/
    uv run pyright src/
    uv run pytest --cov=src/proctx_crawler --cov-fail-under=90
    ```
+8. **Never merge branches locally into main.** Always push the branch to remote and create a pull request via `gh pr create`. This ensures CI runs on the PR and changes are reviewed before merging.
 
 ## Specifications
 
 Spec documents are in `docs/specs/` — read the relevant one before making changes. These are the authoritative design documents for this repo.
 
-**Document everything** — follow a document-first approach. Every feature, design decision, and architectural choice must be reflected in the specs.
+**Document everything** - Follow a document first approach. We must make sure that every feature, design decision, and architectural choice is reflected in the specs. This ensures that the rationale behind decisions is clear and that future contributors can understand the context without needing to read through all the code.
+You are allowed to create new documents if the discussion warrants it.
 
 ## Commands
 
@@ -85,32 +90,38 @@ uv run pytest
 
 ## Non-obvious Coding Guidelines
 
-This project follows the same coding guidelines as ProContext.
+This project follows a set of non-obvious coding guidelines. These must be applied when writing or reviewing any code in this repo.
 
-See [`docs/coding-guidelines.md`](docs/coding-guidelines.md) for the full list.
+See [`.claude/rules/coding-guidelines.md`](.claude/rules/coding-guidelines.md) for the full list.
 
 ## Changelog Maintenance
 
-`CHANGELOG.md` is maintained via the `/changelog-release` skill.
+`CHANGELOG.md` is maintained via the `/changelog-release` skill - use it before committing to populate `[Unreleased]`, or with a version number to finalize a release section.
 
 ## Testing Requirements
 
-- After making changes, run linting, formatting, type checks, and pytest to verify the codebase is clean and all tests pass.
+- Always write test cases first
 - Framework: `uv run --frozen pytest`
 - Async testing: use anyio, not asyncio
 - Coverage: test edge cases and errors
 - New features require tests
 - Bug fixes require regression tests
-- Before pushing, verify highest possible branch coverage on changed files by running
+- IMPORTANT: Before pushing, verify highest possible branch coverage on changed files by running
   `uv run --frozen pytest -x` (coverage is configured in `pyproject.toml` with `fail_under = 90`
-  and `branch = true`).
+  and `branch = true`). If any branch is uncovered, add a test for it before pushing.
 - Avoid `anyio.sleep()` with a fixed duration to wait for async operations. Instead:
-  - Use `anyio.Event` — set it in the callback/handler, `await event.wait()` in the test
+  - Use `anyio.Event` - set it in the callback/handler, `await event.wait()` in the test
   - For stream messages, use `await stream.receive()` instead of `sleep()` + `receive_nowait()`
   - Exception: `sleep()` is appropriate when testing time-based features (e.g., timeouts)
 - Wrap indefinite waits (`event.wait()`, `stream.receive()`) in `anyio.fail_after(5)` to prevent hangs
 - **Failing tests are signals, not obstacles.** When a code change causes existing tests to fail, do not modify the test to make it pass without first understanding *why* it failed. A failing test may indicate a real bug in the change, an unintended behavioral shift, or a violated contract. Investigate the root cause, explain it to the user, and agree on the right fix before proceeding. Only update a test without consulting the user when the change is unambiguously correct (e.g., the test asserts on a renamed field that you just renamed).
+- After making changes, you must run linting, formatting, type checks, and pytest to verify the codebase is clean and all tests pass.
 
+## Conversational Implementation Guidelines
+
+You should interpret the user’s intent from each question and respond accordingly. Although your primary role is to be a coding partner, you should also function as a thoughtful conversational partner. Users may first want to discuss features, explore ideas, review design decisions, or ask general questions about the project or codebase. In such cases, your focus should be on answering clearly, adding useful context, and helping the user think through the problem.
+
+Contribute beyond direct answers by suggesting improvements, implementation approaches, design considerations, and things to avoid. Only start implementing code when the user explicitly asks you to do so.
 
 ## Updates to CLAUDE.md
 

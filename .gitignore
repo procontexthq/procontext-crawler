@@ -99,6 +99,14 @@ CLAUDE.local.md
 docs/private/
 docs/reviews/
 docs/notes/
+docs/slack.md
+docs/agent-team-structure.md
 
 # Playwright browsers (large, downloaded at runtime)
 playwright-browsers/
+
+# Obsidian
+.obsidian
+
+# Implementation tracker (local progress notes)
+docs/Implemented.md
