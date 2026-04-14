@@ -239,12 +239,12 @@ Only apply when `render: true`. Ignored when `render: false`.
 
 For fetching gated or authenticated content. Apply to both static and rendered fetches.
 
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `authenticate` | object | No | — | HTTP Basic Auth credentials: `{"username": "...", "password": "..."}`. |
-| `cookies` | array | No | — | Cookies to set before loading. Each entry: `{"name": "...", "value": "...", "domain": "...", "path": "/"}`. |
-| `set_extra_http_headers` | object | No | — | Custom HTTP headers for the request (e.g., `{"Authorization": "Bearer ..."}` for token-based auth). |
-| `user_agent` | string | No | — | Custom User-Agent string. Note: does not bypass bot detection. |
+| Parameter                | Type   | Required | Default | Description                                                                                                 |
+| ------------------------ | ------ | -------- | ------- | ----------------------------------------------------------------------------------------------------------- |
+| `authenticate`           | object | No       | —       | HTTP Basic Auth credentials: `{"username": "...", "password": "..."}`.                                      |
+| `cookies`                | array  | No       | —       | Cookies to set before loading. Each entry: `{"name": "...", "value": "...", "domain": "...", "path": "/"}`. |
+| `set_extra_http_headers` | object | No       | —       | Custom HTTP headers for the request (e.g., `{"Authorization": "Bearer ..."}` for token-based auth).         |
+| `user_agent`             | string | No       | —       | Custom User-Agent string. Note: does not bypass bot detection.                                              |
 
 ---
 
