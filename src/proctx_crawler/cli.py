@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Literal, cast
 
 import anyio
-import platformdirs
 import structlog
 
+from proctx_crawler.config import Settings, load_settings
 from proctx_crawler.crawler import Crawler
 from proctx_crawler.logging_config import configure_logging
 
@@ -24,6 +24,29 @@ log: structlog.stdlib.BoundLogger = structlog.get_logger()
 # ---------------------------------------------------------------------------
 # Parser construction
 # ---------------------------------------------------------------------------
+
+
+def _add_storage_args(parser: argparse.ArgumentParser) -> None:
+    """Attach shared ``--db-path`` and ``--output-dir`` flags to *parser*.
+
+    These override the corresponding :class:`Settings` fields. When omitted,
+    the values flow from environment variables (``PROCTX_CRAWLER__*``), then
+    ``proctx-crawler.yaml``, then built-in defaults.
+    """
+    parser.add_argument(
+        "--db-path",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="SQLite metadata store path (overrides PROCTX_CRAWLER__DB_PATH)",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        metavar="PATH",
+        help="Directory for crawl content (overrides PROCTX_CRAWLER__OUTPUT_DIR)",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -56,10 +79,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     crawl_parser.add_argument("--include", action="append", help="URL include pattern (repeatable)")
     crawl_parser.add_argument("--exclude", action="append", help="URL exclude pattern (repeatable)")
-    crawl_parser.add_argument("--output", help="Output directory")
     crawl_parser.add_argument(
         "--quiet", action="store_true", default=False, help="Suppress progress messages"
     )
+    _add_storage_args(crawl_parser)
 
     # -- markdown ------------------------------------------------------------
     md_parser = subparsers.add_parser("markdown", help="Extract Markdown from a single page")
@@ -68,6 +91,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--render", action="store_true", default=False, help="Enable Playwright rendering"
     )
     md_parser.add_argument("--output", help="Write to file instead of stdout")
+    _add_storage_args(md_parser)
 
     # -- content -------------------------------------------------------------
     content_parser = subparsers.add_parser("content", help="Fetch HTML from a single page")
@@ -76,6 +100,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--render", action="store_true", default=False, help="Enable Playwright rendering"
     )
     content_parser.add_argument("--output", help="Write to file instead of stdout")
+    _add_storage_args(content_parser)
 
     # -- links ---------------------------------------------------------------
     links_parser = subparsers.add_parser("links", help="Extract links from a single page")
@@ -86,15 +111,49 @@ def _build_parser() -> argparse.ArgumentParser:
     links_parser.add_argument(
         "--external", action="store_true", default=False, help="Include external links"
     )
+    _add_storage_args(links_parser)
 
     # -- serve ---------------------------------------------------------------
     serve_parser = subparsers.add_parser("serve", help="Start the HTTP API server")
     serve_parser.add_argument(
-        "--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1)"
+        "--host", default=None, help="Bind address (overrides PROCTX_CRAWLER__SERVER_HOST)"
     )
-    serve_parser.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080)")
+    serve_parser.add_argument(
+        "--port",
+        type=int,
+        default=None,
+        help="Bind port (overrides PROCTX_CRAWLER__SERVER_PORT)",
+    )
+    _add_storage_args(serve_parser)
 
     return parser
+
+
+# ---------------------------------------------------------------------------
+# Settings resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_settings(args: argparse.Namespace) -> Settings:
+    """Load base settings and apply CLI overrides from *args*.
+
+    CLI flags take highest priority, then env vars (via ``load_settings``),
+    then YAML, then built-in defaults.
+    """
+    overrides: dict[str, object] = {}
+    if getattr(args, "db_path", None) is not None:
+        overrides["db_path"] = args.db_path
+    if getattr(args, "output_dir", None) is not None:
+        overrides["output_dir"] = args.output_dir
+    if getattr(args, "host", None) is not None:
+        overrides["server_host"] = args.host
+    if getattr(args, "port", None) is not None:
+        overrides["server_port"] = args.port
+
+    base = load_settings()
+    if not overrides:
+        return base
+    return base.model_copy(update=overrides)
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +163,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 async def _run_crawl(args: argparse.Namespace) -> None:
     """Execute the crawl subcommand."""
-    output_dir = Path(args.output) if args.output else None
+    settings = _resolve_settings(args)
     raw_formats: list[str] = args.format or ["markdown"]
     formats = cast("list[Literal['markdown', 'html']]", raw_formats)
 
@@ -119,7 +178,7 @@ async def _run_crawl(args: argparse.Namespace) -> None:
     if not args.quiet:
         print(f"Starting crawl: {args.url}", file=sys.stderr)  # noqa: T201
 
-    async with Crawler(output_dir=output_dir) as crawler:
+    async with Crawler(settings=settings) as crawler:
         result = await crawler.crawl(
             args.url,
             limit=args.limit,
@@ -136,14 +195,13 @@ async def _run_crawl(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
 
-    # Print output directory path to stdout
-    resolved_output = output_dir or Path(platformdirs.user_data_dir("proctx-crawler")) / "jobs"
-    print(str(resolved_output))  # noqa: T201
+    print(str(settings.output_dir))  # noqa: T201
 
 
 async def _run_markdown(args: argparse.Namespace) -> None:
     """Execute the markdown subcommand."""
-    async with Crawler() as crawler:
+    settings = _resolve_settings(args)
+    async with Crawler(settings=settings) as crawler:
         text = await crawler.markdown(args.url, render=args.render)
 
     if args.output:
@@ -154,7 +212,8 @@ async def _run_markdown(args: argparse.Namespace) -> None:
 
 async def _run_content(args: argparse.Namespace) -> None:
     """Execute the content subcommand."""
-    async with Crawler() as crawler:
+    settings = _resolve_settings(args)
+    async with Crawler(settings=settings) as crawler:
         text = await crawler.content(args.url, render=args.render)
 
     if args.output:
@@ -165,9 +224,10 @@ async def _run_content(args: argparse.Namespace) -> None:
 
 async def _run_links(args: argparse.Namespace) -> None:
     """Execute the links subcommand."""
+    settings = _resolve_settings(args)
     exclude_external = not args.external
 
-    async with Crawler() as crawler:
+    async with Crawler(settings=settings) as crawler:
         urls = await crawler.links(
             args.url,
             render=args.render,
@@ -187,7 +247,6 @@ async def _async_command(args: argparse.Namespace) -> None:
         "links": _run_links,
     }
     handler = handlers[args.command]
-    # All handlers are async callables taking Namespace
     await handler(args)  # type: ignore[misc]
 
 
@@ -206,8 +265,9 @@ def _run_serve(args: argparse.Namespace) -> None:
 
     from proctx_crawler.api.app import create_app
 
-    app = create_app()
-    uvicorn.run(app, host=args.host, port=args.port)
+    settings = _resolve_settings(args)
+    app = create_app(settings=settings)
+    uvicorn.run(app, host=settings.server_host, port=settings.server_port)
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +284,6 @@ def main(argv: Sequence[str] | None = None) -> None:
         parser.print_help()
         return
 
-    # Configure logging — quiet mode uses WARNING level
     quiet = getattr(args, "quiet", False)
     configure_logging(level="WARNING" if quiet else "INFO")
 

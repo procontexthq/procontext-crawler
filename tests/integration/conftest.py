@@ -127,8 +127,7 @@ def patch_fetcher(
         return FetchResult(url=url, status_code=status_code, html=html, headers={})
 
     mocker.patch("proctx_crawler.core.engine.fetch_static", side_effect=_mock_fetch)
-    mocker.patch("proctx_crawler.crawler.fetch_static", side_effect=_mock_fetch)
-    mocker.patch("proctx_crawler.api.routes.fetch_static", side_effect=_mock_fetch)
+    mocker.patch("proctx_crawler.core.page_service.fetch_static", side_effect=_mock_fetch)
 
     return mock_pages
 

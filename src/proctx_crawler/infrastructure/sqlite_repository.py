@@ -79,14 +79,14 @@ _TERMINAL_URL_STATUSES = frozenset(
 )
 
 
-def _encode_cursor(last_id: str) -> str:
-    """Encode the last record ID into an opaque cursor string."""
-    return base64.urlsafe_b64encode(json.dumps({"id": last_id}).encode()).decode()
+def _encode_cursor(last_rowid: int) -> str:
+    """Encode the last seen insertion-order position into an opaque cursor string."""
+    return base64.urlsafe_b64encode(json.dumps({"rowid": last_rowid}).encode()).decode()
 
 
-def _decode_cursor(cursor: str) -> str:
-    """Decode an opaque cursor string back to the last record ID."""
-    return json.loads(base64.urlsafe_b64decode(cursor))["id"]  # type: ignore[no-any-return]
+def _decode_cursor(cursor: str) -> int:
+    """Decode an opaque cursor string back to the last seen insertion-order position."""
+    return int(json.loads(base64.urlsafe_b64decode(cursor))["rowid"])  # type: ignore[no-any-return]
 
 
 def _now_iso() -> str:
@@ -155,13 +155,16 @@ class SQLiteRepository:
     async def initialise(self) -> None:
         """Open the database, enable WAL mode and foreign keys, create tables."""
         try:
+            # SQLite does not create parent directories; ensure the platformdirs
+            # data dir exists on first run before attempting to connect.
+            self._db_path.parent.mkdir(parents=True, exist_ok=True)
             self._db = await aiosqlite.connect(self._db_path)
             self._db.row_factory = aiosqlite.Row
             await self._db.execute("PRAGMA journal_mode=WAL")
             await self._db.execute("PRAGMA foreign_keys=ON")
             await self._db.executescript(_SCHEMA_DDL)
             await self._db.commit()
-        except aiosqlite.Error:
+        except (aiosqlite.Error, OSError):
             log.error("sqlite_initialise_failed", db_path=str(self._db_path), exc_info=True)
             raise CrawlerError(
                 ErrorCode.FETCH_FAILED,
@@ -334,25 +337,28 @@ class SQLiteRepository:
             params: dict[str, str | int] = {"job_id": job_id, "limit": limit}
 
             if cursor is not None:
-                last_id = _decode_cursor(cursor)
-                conditions.append("id > :cursor_id")
-                params["cursor_id"] = last_id
+                last_rowid = _decode_cursor(cursor)
+                conditions.append("rowid > :cursor_rowid")
+                params["cursor_rowid"] = last_rowid
 
             if status is not None:
                 conditions.append("status = :status")
                 params["status"] = status.value
 
             where_clause = " AND ".join(conditions)
-            query = f"SELECT * FROM url_records WHERE {where_clause} ORDER BY id LIMIT :limit"
+            query = (
+                "SELECT rowid AS _cursor_rowid, * "
+                f"FROM url_records WHERE {where_clause} ORDER BY rowid LIMIT :limit"
+            )
 
             db_cursor = await self._conn().execute(query, params)
-            rows = await db_cursor.fetchall()
+            rows = list(await db_cursor.fetchall())
 
             records = [_row_to_url_record(row) for row in rows]
 
             next_cursor: str | None = None
             if len(records) == limit:
-                next_cursor = _encode_cursor(records[-1].id)
+                next_cursor = _encode_cursor(rows[-1]["_cursor_rowid"])
 
             return records, next_cursor
         except aiosqlite.Error:

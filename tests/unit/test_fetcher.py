@@ -12,6 +12,18 @@ from proctx_crawler.core.fetcher import USER_AGENT, FetchResult, fetch_static
 from proctx_crawler.models import ErrorCode, FetchError
 
 
+class _ExplodingAfterLimitStream(httpx.AsyncByteStream):
+    """Async stream that would explode if the fetcher tried to read past the limit."""
+
+    async def __aiter__(self):  # type: ignore[override]
+        yield b"x" * 60
+        yield b"y" * 60
+        raise AssertionError("fetcher kept reading after size limit was exceeded")
+
+    async def aclose(self) -> None:
+        return None
+
+
 def _mock_dns_public(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch resolve_and_check_ip to always succeed with a public IP."""
     monkeypatch.setattr(
@@ -184,6 +196,19 @@ class TestFetchStaticResponseSize:
 
         with pytest.raises(FetchError, match="Response size"):
             await fetch_static("http://example.com/large", max_response_size=100)
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_response_limit_is_enforced_while_streaming(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _mock_dns_public(monkeypatch)
+        respx.get("http://example.com/streaming-large").mock(
+            return_value=httpx.Response(200, stream=_ExplodingAfterLimitStream())
+        )
+
+        with pytest.raises(FetchError, match="Response size"):
+            await fetch_static("http://example.com/streaming-large", max_response_size=100)
 
 
 # ---------------------------------------------------------------------------

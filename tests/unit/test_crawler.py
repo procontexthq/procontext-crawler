@@ -51,7 +51,7 @@ def _patch_fetcher(mocker: MockerFixture, pages: dict[str, tuple[int, str]]) -> 
         return FetchResult(url=url, status_code=status_code, html=html, headers={})
 
     mocker.patch("proctx_crawler.core.engine.fetch_static", side_effect=_mock_fetch)
-    mocker.patch("proctx_crawler.crawler.fetch_static", side_effect=_mock_fetch)
+    mocker.patch("proctx_crawler.core.page_service.fetch_static", side_effect=_mock_fetch)
 
 
 # ---------------------------------------------------------------------------
@@ -307,6 +307,48 @@ class TestLinks:
             with pytest.raises(FetchError):
                 await crawler.links("https://example.com/missing")
 
+    @pytest.mark.anyio
+    async def test_visible_links_only_uses_rendered_extractor(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        mock_pool_instance = AsyncMock()
+        mocker.patch("proctx_crawler.crawler.BrowserPool", return_value=mock_pool_instance)
+        mock_visible = mocker.patch(
+            "proctx_crawler.crawler.extract_visible_links_rendered",
+            return_value=["https://example.com/page1", "https://external.com/page"],
+        )
+
+        async with Crawler(output_dir=tmp_path / "out", db_path=tmp_path / "test.db") as crawler:
+            urls = await crawler.links(
+                "https://example.com",
+                render=True,
+                visible_links_only=True,
+            )
+
+        assert urls == ["https://example.com/page1", "https://external.com/page"]
+        mock_visible.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_visible_links_only_still_filters_external_links(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        mock_pool_instance = AsyncMock()
+        mocker.patch("proctx_crawler.crawler.BrowserPool", return_value=mock_pool_instance)
+        mocker.patch(
+            "proctx_crawler.crawler.extract_visible_links_rendered",
+            return_value=["https://example.com/page1", "https://external.com/page"],
+        )
+
+        async with Crawler(output_dir=tmp_path / "out", db_path=tmp_path / "test.db") as crawler:
+            urls = await crawler.links(
+                "https://example.com",
+                render=True,
+                visible_links_only=True,
+                exclude_external_links=True,
+            )
+
+        assert urls == ["https://example.com/page1"]
+
 
 # ---------------------------------------------------------------------------
 # Browser pool (render=True)
@@ -326,7 +368,7 @@ class TestBrowserPool:
         mock_pool_cls = mocker.patch(
             "proctx_crawler.crawler.BrowserPool", return_value=mock_pool_instance
         )
-        mocker.patch("proctx_crawler.crawler.fetch_rendered", return_value=mock_result)
+        mocker.patch("proctx_crawler.core.page_service.fetch_rendered", return_value=mock_result)
 
         async with Crawler(output_dir=tmp_path / "out", db_path=tmp_path / "test.db") as crawler:
             with anyio.fail_after(5):
@@ -346,7 +388,7 @@ class TestBrowserPool:
         mock_pool_cls = mocker.patch(
             "proctx_crawler.crawler.BrowserPool", return_value=mock_pool_instance
         )
-        mocker.patch("proctx_crawler.crawler.fetch_rendered", return_value=mock_result)
+        mocker.patch("proctx_crawler.core.page_service.fetch_rendered", return_value=mock_result)
 
         async with Crawler(output_dir=tmp_path / "out", db_path=tmp_path / "test.db") as crawler:
             with anyio.fail_after(5):
@@ -391,7 +433,7 @@ class TestErrorPropagation:
         mock_pool_instance = AsyncMock()
         mocker.patch("proctx_crawler.crawler.BrowserPool", return_value=mock_pool_instance)
         mocker.patch(
-            "proctx_crawler.crawler.fetch_rendered",
+            "proctx_crawler.core.page_service.fetch_rendered",
             side_effect=RenderError(
                 code=ErrorCode.RENDER_FAILED,
                 message="Playwright crashed",
@@ -425,6 +467,66 @@ class TestDefaults:
         crawler = Crawler(output_dir=tmp_path / "custom", db_path=tmp_path / "custom.db")
         assert crawler._output_dir == tmp_path / "custom"
         assert crawler._db_path == tmp_path / "custom.db"
+
+    def test_settings_injection(self, tmp_path: Path) -> None:
+        """An injected Settings instance populates all fields."""
+        from proctx_crawler.config import Settings
+
+        settings = Settings(
+            output_dir=tmp_path / "from-settings",
+            db_path=tmp_path / "from-settings.db",
+            playwright_headless=False,
+        )
+        crawler = Crawler(settings=settings)
+        assert crawler._output_dir == tmp_path / "from-settings"
+        assert crawler._db_path == tmp_path / "from-settings.db"
+        assert crawler._playwright_headless is False
+
+    def test_explicit_kwargs_override_settings(self, tmp_path: Path) -> None:
+        """Explicit kwargs win over an injected Settings instance."""
+        from proctx_crawler.config import Settings
+
+        settings = Settings(
+            output_dir=tmp_path / "ignored",
+            db_path=tmp_path / "ignored.db",
+            playwright_headless=True,
+        )
+        crawler = Crawler(
+            settings=settings,
+            output_dir=tmp_path / "wins",
+            db_path=tmp_path / "wins.db",
+            playwright_headless=False,
+        )
+        assert crawler._output_dir == tmp_path / "wins"
+        assert crawler._db_path == tmp_path / "wins.db"
+        assert crawler._playwright_headless is False
+
+    @pytest.mark.anyio
+    async def test_settings_max_response_size_reaches_static_fetch(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        from proctx_crawler.config import Settings
+
+        settings = Settings(
+            output_dir=tmp_path / "out",
+            db_path=tmp_path / "test.db",
+            max_response_size=2048,
+        )
+        mock_result = FetchResult(
+            url="https://example.com",
+            status_code=200,
+            html="<html><body><p>Hello</p></body></html>",
+            headers={},
+        )
+        mock_static = mocker.patch(
+            "proctx_crawler.core.page_service.fetch_static",
+            return_value=mock_result,
+        )
+
+        async with Crawler(settings=settings) as crawler:
+            await crawler.markdown("https://example.com")
+
+        mock_static.assert_awaited_once_with("https://example.com", max_response_size=2048)
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +576,9 @@ class TestCrawlWithRender:
         mocker.patch("proctx_crawler.crawler.BrowserPool", return_value=mock_pool_instance)
         mock_run_crawl = mocker.patch("proctx_crawler.crawler.run_crawl")
 
-        async def _fake_run_crawl(job, repo, storage, browser_pool=None):  # type: ignore[no-untyped-def]
+        async def _fake_run_crawl(  # type: ignore[no-untyped-def]
+            job, repo, storage, browser_pool=None, max_response_size=10_485_760
+        ):
             await repo.enqueue_url(job.id, job.url, depth=0)
             await repo.mark_url_completed(job.id, job.url, http_status=200, title="Home")
             await repo.update_job_status(job.id, JobStatus.COMPLETED)

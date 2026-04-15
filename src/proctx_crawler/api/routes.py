@@ -2,31 +2,29 @@
 
 from __future__ import annotations
 
-import uuid
-from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Annotated, NoReturn
 
 import structlog
 from fastapi import APIRouter, Query, Request
 
+from proctx_crawler.core.crawl_service import (
+    build_and_persist_job,
+    url_record_to_crawl_record,
+)
 from proctx_crawler.core.engine import run_crawl
-from proctx_crawler.core.fetcher import fetch_static
-from proctx_crawler.core.renderer import fetch_rendered
+from proctx_crawler.core.page_service import fetch_page_html
+from proctx_crawler.core.renderer import extract_visible_links_rendered
 from proctx_crawler.core.url_utils import is_same_domain
 from proctx_crawler.extractors import extract_html, extract_links, html_to_markdown
 from proctx_crawler.models import (
     CrawlConfig,
-    CrawlRecord,
     CrawlResult,
     ErrorCode,
-    Job,
     JobNotFoundError,
     JobStatus,
     LinksInput,
-    RecordMetadata,
     SinglePageInput,
     SuccessResponse,
-    UrlRecord,
     UrlStatus,
 )
 
@@ -43,7 +41,7 @@ _TERMINAL_STATUSES = frozenset({JobStatus.COMPLETED, JobStatus.CANCELLED, JobSta
 
 
 # ---------------------------------------------------------------------------
-# Helpers
+# app.state accessors
 # ---------------------------------------------------------------------------
 
 
@@ -67,37 +65,6 @@ def _raise_job_not_found(job_id: str) -> NoReturn:
     )
 
 
-async def _url_record_to_crawl_record(
-    job_id: str,
-    rec: UrlRecord,
-    storage: ContentStorage,
-    formats: list[str],
-) -> CrawlRecord:
-    """Convert a UrlRecord into a CrawlRecord, reading content from storage."""
-    md_content: str | None = None
-    html_content: str | None = None
-    metadata: RecordMetadata | None = None
-
-    if rec.status == UrlStatus.COMPLETED:
-        if "markdown" in formats:
-            md_content = await storage.read(job_id, rec.url, "markdown")
-        if "html" in formats:
-            html_content = await storage.read(job_id, rec.url, "html")
-        metadata = RecordMetadata(
-            http_status=rec.http_status or 0,
-            title=rec.title,
-            content_hash=rec.content_hash,
-        )
-
-    return CrawlRecord(
-        url=rec.url,
-        status=rec.status,
-        markdown=md_content,
-        html=html_content,
-        metadata=metadata,
-    )
-
-
 # ---------------------------------------------------------------------------
 # POST /crawl — Start crawl job
 # ---------------------------------------------------------------------------
@@ -108,24 +75,21 @@ async def start_crawl(config: CrawlConfig, request: Request) -> SuccessResponse[
     """Create a new crawl job and start it in the background."""
     repo = _repo(request)
     storage = _storage(request)
-    browser_pool = _browser_pool(request)
+    pool = _browser_pool(request) if config.render else None
+    max_response_size = request.app.state.settings.max_response_size
 
-    now = datetime.now(UTC)
-    job_id = str(uuid.uuid4())
-    job = Job(
-        id=job_id,
-        url=config.url,
-        config=config,
-        created_at=now,
-        updated_at=now,
+    job = await build_and_persist_job(config.url, config, repo)
+    request.app.state.task_group.start_soon(
+        run_crawl,
+        job,
+        repo,
+        storage,
+        pool,
+        max_response_size,
     )
-    await repo.create_job(job)
 
-    pool = browser_pool if config.render else None
-    request.app.state.task_group.start_soon(run_crawl, job, repo, storage, pool)
-
-    log.info("crawl_job_created", job_id=job_id, url=config.url)
-    return SuccessResponse(result=job_id)
+    log.info("crawl_job_created", job_id=job.id, url=config.url)
+    return SuccessResponse(result=job.id)
 
 
 # ---------------------------------------------------------------------------
@@ -165,8 +129,8 @@ async def get_crawl(
         id, limit=limit, cursor=cursor, status=status
     )
 
-    formats = [f for f in job.config.formats]
-    records = [await _url_record_to_crawl_record(id, rec, storage, formats) for rec in url_records]
+    formats = list(job.config.formats)
+    records = [await url_record_to_crawl_record(id, rec, storage, formats) for rec in url_records]
 
     return SuccessResponse(
         result=CrawlResult(
@@ -215,13 +179,10 @@ async def cancel_crawl(
 async def get_markdown(body: SinglePageInput, request: Request) -> SuccessResponse[str]:
     """Fetch a single page and convert to Markdown, or convert provided HTML directly."""
     if body.html is not None:
-        md = html_to_markdown(body.html)
-        return SuccessResponse(result=md)
+        return SuccessResponse(result=html_to_markdown(body.html))
 
-    assert body.url is not None  # guaranteed by model validator
-    result = await _fetch_single_page(body, request)
-    md = html_to_markdown(result)
-    return SuccessResponse(result=md)
+    html = await _fetch_single_page_html(body, request)
+    return SuccessResponse(result=html_to_markdown(html))
 
 
 # ---------------------------------------------------------------------------
@@ -235,8 +196,7 @@ async def get_content(body: SinglePageInput, request: Request) -> SuccessRespons
     if body.html is not None:
         return SuccessResponse(result=extract_html(body.html))
 
-    assert body.url is not None  # guaranteed by model validator
-    html = await _fetch_single_page(body, request)
+    html = await _fetch_single_page_html(body, request)
     return SuccessResponse(result=extract_html(html))
 
 
@@ -248,31 +208,41 @@ async def get_content(body: SinglePageInput, request: Request) -> SuccessRespons
 @router.post("/links")
 async def get_links(body: LinksInput, request: Request) -> SuccessResponse[list[str]]:
     """Fetch a page and extract all links."""
-    assert body.url is not None  # LinksInput requires url (no html-only mode for links)
-    html = await _fetch_single_page(body, request)
-    all_links = extract_links(html, body.url)
+    assert body.url is not None
+    if body.render and body.visible_links_only:
+        all_links = await extract_visible_links_rendered(
+            body.url,
+            _browser_pool(request),
+            goto_options=body.goto_options,
+            wait_for_selector=body.wait_for_selector,
+            reject_resource_types=body.reject_resource_types,
+        )
+    else:
+        html = await _fetch_single_page_html(body, request)
+        all_links = extract_links(html, body.url)
+
     if body.exclude_external_links:
         all_links = [link for link in all_links if is_same_domain(link, body.url)]
     return SuccessResponse(result=all_links)
 
 
 # ---------------------------------------------------------------------------
-# Internal fetch helper
+# HTTP-to-service adapter
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_single_page(body: SinglePageInput, request: Request) -> str:
-    """Fetch a page via static or rendered path, returning the HTML string."""
+async def _fetch_single_page_html(body: SinglePageInput | LinksInput, request: Request) -> str:
+    """Adapt a validated request body to the shared page_service and return HTML."""
     assert body.url is not None
-    if body.render:
-        pool = _browser_pool(request)
-        result = await fetch_rendered(
-            body.url,
-            pool,
-            goto_options=body.goto_options,
-            wait_for_selector=body.wait_for_selector,
-            reject_resource_types=body.reject_resource_types,
-        )
-    else:
-        result = await fetch_static(body.url)
+    pool = _browser_pool(request) if body.render else None
+    max_response_size = request.app.state.settings.max_response_size
+    result = await fetch_page_html(
+        body.url,
+        render=body.render,
+        browser_pool=pool,
+        goto_options=body.goto_options,
+        wait_for_selector=body.wait_for_selector,
+        reject_resource_types=body.reject_resource_types,
+        max_response_size=max_response_size,
+    )
     return result.html

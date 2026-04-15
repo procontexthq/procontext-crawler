@@ -55,7 +55,7 @@ async def test_app(
     app.state.repo = repo
     app.state.storage = storage
     app.state.browser_pool = browser_pool
-    app.state.settings = MagicMock(auth_api_key=None)
+    app.state.settings = MagicMock(auth_api_key=None, max_response_size=10_485_760)
 
     # Patch fetcher in routes and engine modules
     async def _mock_fetch(url: str, **_kwargs: object) -> FetchResult:
@@ -68,7 +68,7 @@ async def test_app(
         status_code, html = mock_pages[url]
         return FetchResult(url=url, status_code=status_code, html=html, headers={})
 
-    mocker.patch("proctx_crawler.api.routes.fetch_static", side_effect=_mock_fetch)
+    mocker.patch("proctx_crawler.core.page_service.fetch_static", side_effect=_mock_fetch)
     mocker.patch("proctx_crawler.core.engine.fetch_static", side_effect=_mock_fetch)
 
     async with anyio.create_task_group() as tg:
@@ -343,6 +343,17 @@ class TestPostLinks:
         assert "https://docs.example.com/getting-started" in result
         assert "https://external.example.org/resource" not in result
 
+    @pytest.mark.anyio
+    async def test_links_rejects_html_only_input(self, client: httpx.AsyncClient) -> None:
+        resp = await client.post(
+            "/links",
+            json={"html": "<a href='https://docs.example.com/getting-started'>Start</a>"},
+        )
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["success"] is False
+        assert data["error"]["code"] == "INVALID_INPUT"
+
 
 # ---------------------------------------------------------------------------
 # 404 for missing job
@@ -393,6 +404,9 @@ class TestErrorEnvelope:
 
     @pytest.mark.anyio
     async def test_validation_error_envelope(self, client: httpx.AsyncClient) -> None:
-        """Invalid input should produce a 422 response."""
+        """Invalid input should produce the standard 400 error envelope."""
         resp = await client.post("/crawl", json={})
-        assert resp.status_code == 422
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["success"] is False
+        assert data["error"]["code"] == "INVALID_INPUT"

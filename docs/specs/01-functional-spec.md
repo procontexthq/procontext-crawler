@@ -470,11 +470,11 @@ The `result` is the job ID (UUID). Use it with `GET /crawl` to poll.
 
 **Purpose**: Extract all links from a page. Useful for understanding page structure before crawling, or for building URL lists programmatically.
 
-**Input**: Single-page base parameters (Section 6.1) + rendering parameters (Section 6.2), plus:
+**Input**: Same as the single-page URL fetch parameters, except `/links` requires `url` and does not accept raw `html`. Rendering parameters from Section 6.2 still apply, plus:
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `visible_links_only` | boolean | No | `false` | Return only user-visible links (skip hidden elements). Only effective when `render: true`. |
+| `visible_links_only` | boolean | No | `false` | Return only links that are not clearly invisible. Only effective when `render: true`; filters anchors hidden via attributes/styles such as `hidden`, `aria-hidden="true"`, `display:none`, `visibility:hidden`, or no layout box. |
 | `exclude_external_links` | boolean | No | `false` | Filter out cross-domain links. |
 
 **Processing**:
@@ -483,6 +483,7 @@ The `result` is the job ID (UUID). Use it with `GET /crawl` to poll.
 2. Parse all `<a href="...">` elements
 3. Resolve relative URLs to absolute
 4. Apply filters (`visible_links_only`, `exclude_external_links`)
+   `visible_links_only` is conservative: links are treated as visible by default and excluded only when the rendered DOM clearly marks them as invisible.
 5. Deduplicate and return
 
 **Output**:

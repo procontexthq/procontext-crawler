@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from proctx_crawler.core.fetcher import FetchResult
-from proctx_crawler.core.renderer import fetch_rendered
+from proctx_crawler.core.renderer import extract_visible_links_rendered, fetch_rendered
 from proctx_crawler.models import ErrorCode, GotoOptions, RenderError
 
 
@@ -16,6 +16,7 @@ def _make_mock_pool(
     html: str = "<html><body>rendered</body></html>",
     page_url: str = "http://example.com/page",
     status: int = 200,
+    evaluated_links: list[str] | None = None,
 ) -> MagicMock:
     """Create a mock BrowserPool that returns a mock page with the given content."""
     mock_response = MagicMock()
@@ -24,6 +25,13 @@ def _make_mock_pool(
     mock_page = AsyncMock()
     mock_page.goto = AsyncMock(return_value=mock_response)
     mock_page.content = AsyncMock(return_value=html)
+    mock_page.evaluate = AsyncMock(
+        return_value=(
+            evaluated_links
+            if evaluated_links is not None
+            else ["http://example.com/page", "http://example.com/page#section"]
+        )
+    )
     mock_page.url = page_url
     mock_page.route = AsyncMock()
     mock_page.wait_for_selector = AsyncMock()
@@ -248,3 +256,58 @@ class TestFetchRenderedErrors:
 
         assert exc_info.value is original_error
         assert exc_info.value.message == "Original error"
+
+
+# ---------------------------------------------------------------------------
+# extract_visible_links_rendered()
+# ---------------------------------------------------------------------------
+
+
+class TestExtractVisibleLinksRendered:
+    @pytest.mark.anyio
+    async def test_returns_deduplicated_fragmentless_links(self) -> None:
+        pool = _make_mock_pool(
+            evaluated_links=[
+                "https://example.com/page#intro",
+                "https://example.com/page#other",
+                "https://example.com/next",
+            ]
+        )
+
+        result = await extract_visible_links_rendered("https://example.com/page", pool)
+
+        assert result == [
+            "https://example.com/page",
+            "https://example.com/next",
+        ]
+
+    @pytest.mark.anyio
+    async def test_filters_non_http_links(self) -> None:
+        pool = _make_mock_pool(
+            evaluated_links=[
+                "https://example.com/page",
+                "mailto:test@example.com",
+                "javascript:void(0)",
+            ]
+        )
+
+        result = await extract_visible_links_rendered("https://example.com/page", pool)
+
+        assert result == ["https://example.com/page"]
+
+    @pytest.mark.anyio
+    async def test_wait_for_selector_and_route_are_applied(self) -> None:
+        pool = _make_mock_pool()
+
+        await extract_visible_links_rendered(
+            "https://example.com/page",
+            pool,
+            wait_for_selector="#content",
+            reject_resource_types=["image"],
+        )
+
+        mock_cm = pool.acquire_context()
+        mock_context = await mock_cm.__aenter__()
+        mock_page = await mock_context.new_page()
+        mock_page.wait_for_selector.assert_awaited_once()
+        mock_page.route.assert_awaited_once()

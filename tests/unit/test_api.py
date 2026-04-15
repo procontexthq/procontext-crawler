@@ -126,6 +126,7 @@ def app(
     test_app.state.storage = mock_storage
     test_app.state.browser_pool = mock_browser_pool
     test_app.state.task_group = mock_task_group
+    test_app.state.settings = MagicMock(max_response_size=2048, auth_api_key=None)
     return test_app
 
 
@@ -155,12 +156,18 @@ class TestPostCrawl:
 
         mock_repo.create_job.assert_awaited_once()
         mock_task_group.start_soon.assert_called_once()
+        start_args = mock_task_group.start_soon.call_args.args
+        assert start_args[0].__name__ == "run_crawl"
+        assert start_args[-1] == 2048
 
     @pytest.mark.anyio
     async def test_invalid_input_returns_400(self, client: httpx.AsyncClient) -> None:
         # Missing 'url' field
         resp = await client.post("/crawl", json={})
-        assert resp.status_code == 422  # FastAPI validation error
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["success"] is False
+        assert data["error"]["code"] == "INVALID_INPUT"
 
 
 # ---------------------------------------------------------------------------
@@ -289,7 +296,7 @@ class TestPostMarkdown:
     ) -> None:
         html = "<html><body><p>Hello world</p></body></html>"
         mock_result = FetchResult(url="https://example.com", status_code=200, html=html, headers={})
-        mocker.patch("proctx_crawler.api.routes.fetch_static", return_value=mock_result)
+        mocker.patch("proctx_crawler.core.page_service.fetch_static", return_value=mock_result)
 
         resp = await client.post("/markdown", json={"url": "https://example.com"})
         assert resp.status_code == 200
@@ -320,7 +327,7 @@ class TestPostContent:
     ) -> None:
         html = "<html><body><p>Hello</p></body></html>"
         mock_result = FetchResult(url="https://example.com", status_code=200, html=html, headers={})
-        mocker.patch("proctx_crawler.api.routes.fetch_static", return_value=mock_result)
+        mocker.patch("proctx_crawler.core.page_service.fetch_static", return_value=mock_result)
 
         resp = await client.post("/content", json={"url": "https://example.com"})
         assert resp.status_code == 200
@@ -353,7 +360,7 @@ class TestPostLinks:
             "</body></html>"
         )
         mock_result = FetchResult(url="https://example.com", status_code=200, html=html, headers={})
-        mocker.patch("proctx_crawler.api.routes.fetch_static", return_value=mock_result)
+        mocker.patch("proctx_crawler.core.page_service.fetch_static", return_value=mock_result)
 
         resp = await client.post("/links", json={"url": "https://example.com"})
         assert resp.status_code == 200
@@ -373,7 +380,7 @@ class TestPostLinks:
             "</body></html>"
         )
         mock_result = FetchResult(url="https://example.com", status_code=200, html=html, headers={})
-        mocker.patch("proctx_crawler.api.routes.fetch_static", return_value=mock_result)
+        mocker.patch("proctx_crawler.core.page_service.fetch_static", return_value=mock_result)
 
         resp = await client.post(
             "/links",
@@ -383,6 +390,62 @@ class TestPostLinks:
         data = resp.json()
         assert "https://example.com/page1" in data["result"]
         assert "https://external.com/page" not in data["result"]
+
+    @pytest.mark.anyio
+    async def test_visible_links_only_uses_rendered_extractor(
+        self, client: httpx.AsyncClient, mocker: MockerFixture
+    ) -> None:
+        mock_visible = mocker.patch(
+            "proctx_crawler.api.routes.extract_visible_links_rendered",
+            return_value=["https://example.com/page1"],
+        )
+
+        resp = await client.post(
+            "/links",
+            json={
+                "url": "https://example.com",
+                "render": True,
+                "visible_links_only": True,
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["result"] == ["https://example.com/page1"]
+        mock_visible.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_visible_links_only_can_still_filter_external_links(
+        self, client: httpx.AsyncClient, mocker: MockerFixture
+    ) -> None:
+        mocker.patch(
+            "proctx_crawler.api.routes.extract_visible_links_rendered",
+            return_value=[
+                "https://example.com/page1",
+                "https://external.com/page",
+            ],
+        )
+
+        resp = await client.post(
+            "/links",
+            json={
+                "url": "https://example.com",
+                "render": True,
+                "visible_links_only": True,
+                "exclude_external_links": True,
+            },
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["result"] == ["https://example.com/page1"]
+
+    @pytest.mark.anyio
+    async def test_html_only_is_invalid_for_links(self, client: httpx.AsyncClient) -> None:
+        resp = await client.post("/links", json={"html": "<a href='https://example.com'>x</a>"})
+
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["success"] is False
+        assert data["error"]["code"] == "INVALID_INPUT"
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +459,7 @@ class TestCrawlerErrorHandler:
         self, client: httpx.AsyncClient, mocker: MockerFixture
     ) -> None:
         mocker.patch(
-            "proctx_crawler.api.routes.fetch_static",
+            "proctx_crawler.core.page_service.fetch_static",
             side_effect=FetchError(
                 code=ErrorCode.FETCH_FAILED,
                 message="Connection refused",
@@ -416,7 +479,7 @@ class TestCrawlerErrorHandler:
         self, client: httpx.AsyncClient, mocker: MockerFixture
     ) -> None:
         mocker.patch(
-            "proctx_crawler.api.routes.fetch_static",
+            "proctx_crawler.core.page_service.fetch_static",
             side_effect=FetchError(
                 code=ErrorCode.NOT_FOUND,
                 message="Page not found",
@@ -461,6 +524,7 @@ class TestAuthMiddleware:
         inner.state.storage = mock_storage
         inner.state.browser_pool = mock_browser_pool
         inner.state.task_group = mock_task_group
+        inner.state.settings = MagicMock(max_response_size=2048, auth_api_key="test-secret-key")
         return AuthMiddleware(inner, api_key="test-secret-key")
 
     @pytest.fixture
@@ -501,6 +565,21 @@ class TestAuthMiddleware:
         data = resp.json()
         assert data["success"] is True
         mock_repo.create_job.assert_awaited_once()
+
+    @pytest.mark.anyio
+    async def test_compare_digest_supports_same_value(
+        self,
+        auth_client: httpx.AsyncClient,
+        mock_repo: AsyncMock,
+    ) -> None:
+        resp = await auth_client.post(
+            "/crawl",
+            json={"url": "https://example.com"},
+            headers={"Authorization": "".join(["Bearer ", "test-secret-key"])},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["success"] is True
+        mock_repo.create_job.assert_awaited()
 
     @pytest.mark.anyio
     async def test_non_http_scope_passes_through(self, auth_app: AuthMiddleware) -> None:
@@ -564,7 +643,7 @@ class TestRenderPathInRoutes:
         html = "<html><body><p>Rendered content</p></body></html>"
         mock_result = FetchResult(url="https://example.com", status_code=200, html=html, headers={})
         mock_render = mocker.patch(
-            "proctx_crawler.api.routes.fetch_rendered", return_value=mock_result
+            "proctx_crawler.core.page_service.fetch_rendered", return_value=mock_result
         )
 
         resp = await client.post(
@@ -585,7 +664,7 @@ class TestRenderPathInRoutes:
         """POST /links with render=True should call fetch_rendered."""
         html = '<html><body><a href="https://example.com/a">link</a></body></html>'
         mock_result = FetchResult(url="https://example.com", status_code=200, html=html, headers={})
-        mocker.patch("proctx_crawler.api.routes.fetch_rendered", return_value=mock_result)
+        mocker.patch("proctx_crawler.core.page_service.fetch_rendered", return_value=mock_result)
 
         resp = await client.post(
             "/links",
@@ -627,3 +706,41 @@ class TestValidationErrorHandler:
         body = json.loads(response.body)
         assert body["success"] is False
         assert body["error"]["code"] == "INVALID_INPUT"
+
+    @pytest.mark.anyio
+    async def test_request_validation_error_returns_400(
+        self,
+        client: httpx.AsyncClient,
+    ) -> None:
+        resp = await client.post("/crawl", json={})
+        assert resp.status_code == 400
+        body = resp.json()
+        assert body["success"] is False
+        assert body["error"]["code"] == "INVALID_INPUT"
+
+
+class TestSettingsPropagationInRoutes:
+    @pytest.mark.anyio
+    async def test_markdown_uses_app_max_response_size(
+        self,
+        client: httpx.AsyncClient,
+        mocker: MockerFixture,
+    ) -> None:
+        mock_result = FetchResult(
+            url="https://example.com",
+            status_code=200,
+            html="<html><body><p>Hello</p></body></html>",
+            headers={},
+        )
+        mock_static = mocker.patch(
+            "proctx_crawler.core.page_service.fetch_static",
+            return_value=mock_result,
+        )
+
+        resp = await client.post("/markdown", json={"url": "https://example.com"})
+
+        assert resp.status_code == 200
+        mock_static.assert_awaited_once_with(
+            "https://example.com",
+            max_response_size=2048,
+        )

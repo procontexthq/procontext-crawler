@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-import uuid
-from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-import platformdirs
 import structlog
 
+from proctx_crawler.config import Settings, load_settings
 from proctx_crawler.core.browser_pool import BrowserPool
+from proctx_crawler.core.crawl_service import (
+    build_and_persist_job,
+    collect_crawl_result,
+)
 from proctx_crawler.core.engine import run_crawl
-from proctx_crawler.core.fetcher import FetchResult, fetch_static
-from proctx_crawler.core.renderer import fetch_rendered
+from proctx_crawler.core.page_service import fetch_page_html
+from proctx_crawler.core.renderer import extract_visible_links_rendered
 from proctx_crawler.core.url_utils import is_same_domain
 from proctx_crawler.extractors import extract_html, extract_links, html_to_markdown
 from proctx_crawler.infrastructure.content_storage import ContentStorage
@@ -21,33 +22,29 @@ from proctx_crawler.infrastructure.sqlite_repository import SQLiteRepository
 from proctx_crawler.models import (
     CrawlConfig,
     CrawlOptions,
-    CrawlRecord,
     CrawlResult,
     GotoOptions,
-    Job,
-    JobStatus,
-    RecordMetadata,
-    UrlRecord,
-    UrlStatus,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from pathlib import Path
     from types import TracebackType
+
+    from proctx_crawler.core.fetcher import FetchResult
 
 log: structlog.stdlib.BoundLogger = structlog.get_logger()
 
 
-def _default_output_dir() -> Path:
-    return Path(platformdirs.user_data_dir("proctx-crawler")) / "jobs"
-
-
-def _default_db_path() -> Path:
-    return Path(platformdirs.user_data_dir("proctx-crawler")) / "crawler.db"
-
-
 class Crawler:
     """Async context manager wrapping the crawl engine, repository, and storage.
+
+    Configuration precedence (highest to lowest):
+
+    1. Explicit keyword overrides (``output_dir``, ``db_path``,
+       ``playwright_headless``).
+    2. An injected ``Settings`` instance passed via ``settings=``.
+    3. ``load_settings()`` — environment variables (``PROCTX_CRAWLER__*``),
+       ``proctx-crawler.yaml`` in the working directory, and built-in defaults.
 
     Usage::
 
@@ -59,11 +56,18 @@ class Crawler:
     def __init__(
         self,
         *,
+        settings: Settings | None = None,
         output_dir: Path | None = None,
         db_path: Path | None = None,
+        playwright_headless: bool | None = None,
     ) -> None:
-        self._output_dir = output_dir or _default_output_dir()
-        self._db_path = db_path or _default_db_path()
+        resolved = settings if settings is not None else load_settings()
+        self._output_dir = output_dir if output_dir is not None else resolved.output_dir
+        self._db_path = db_path if db_path is not None else resolved.db_path
+        self._playwright_headless = (
+            playwright_headless if playwright_headless is not None else resolved.playwright_headless
+        )
+        self._max_response_size = resolved.max_response_size
         self._repo: SQLiteRepository | None = None
         self._storage: ContentStorage | None = None
         self._browser_pool: BrowserPool | None = None
@@ -111,11 +115,6 @@ class Crawler:
         storage = self._get_storage()
 
         resolved_formats: list[Literal["markdown", "html"]] = formats if formats else ["markdown"]
-        goto = _build_goto_options(goto_options)
-        crawl_options = CrawlOptions(**options) if options else CrawlOptions()
-
-        now = datetime.now(UTC)
-        job_id = str(uuid.uuid4())
         config = CrawlConfig(
             url=url,
             limit=limit,
@@ -123,21 +122,17 @@ class Crawler:
             source=source,
             formats=resolved_formats,
             render=render,
-            goto_options=goto,
+            goto_options=_build_goto_options(goto_options),
             wait_for_selector=wait_for_selector,
             reject_resource_types=reject_resource_types,
-            options=crawl_options,
+            options=CrawlOptions(**options) if options else CrawlOptions(),
         )
-        job = Job(id=job_id, url=url, config=config, created_at=now, updated_at=now)
-        await repo.create_job(job)
+        job = await build_and_persist_job(url, config, repo)
 
-        browser_pool: BrowserPool | None = None
-        if render:
-            browser_pool = await self._ensure_browser_pool()
+        pool = await self._ensure_browser_pool() if render else None
+        await run_crawl(job, repo, storage, pool, max_response_size=self._max_response_size)
 
-        await run_crawl(job, repo, storage, browser_pool)
-
-        return await _collect_crawl_result(job_id, repo, storage, resolved_formats)
+        return await collect_crawl_result(job.id, repo, storage, resolved_formats)
 
     async def markdown(
         self,
@@ -182,21 +177,32 @@ class Crawler:
         url: str,
         *,
         render: bool = False,
-        visible_links_only: bool = False,  # noqa: ARG002
+        visible_links_only: bool = False,
         exclude_external_links: bool = False,
         goto_options: dict[str, Any] | None = None,
         wait_for_selector: str | None = None,
         reject_resource_types: list[str] | None = None,
     ) -> list[str]:
         """Fetch a single page and return all links found on it."""
-        result = await self._fetch_page(
-            url,
-            render=render,
-            goto_options=goto_options,
-            wait_for_selector=wait_for_selector,
-            reject_resource_types=reject_resource_types,
-        )
-        all_links = extract_links(result.html, result.url)
+        if render and visible_links_only:
+            pool = await self._ensure_browser_pool()
+            all_links = await extract_visible_links_rendered(
+                url,
+                pool,
+                goto_options=_build_goto_options(goto_options),
+                wait_for_selector=wait_for_selector,
+                reject_resource_types=reject_resource_types,
+            )
+        else:
+            result = await self._fetch_page(
+                url,
+                render=render,
+                goto_options=goto_options,
+                wait_for_selector=wait_for_selector,
+                reject_resource_types=reject_resource_types,
+            )
+            all_links = extract_links(result.html, result.url)
+
         if exclude_external_links:
             return [link for link in all_links if is_same_domain(link, url)]
         return all_links
@@ -220,7 +226,7 @@ class Crawler:
     async def _ensure_browser_pool(self) -> BrowserPool:
         """Lazily create and start the browser pool on first render request."""
         if self._browser_pool is None:
-            self._browser_pool = BrowserPool()
+            self._browser_pool = BrowserPool(headless=self._playwright_headless)
             await self._browser_pool.start()
         return self._browser_pool
 
@@ -233,18 +239,17 @@ class Crawler:
         wait_for_selector: str | None,
         reject_resource_types: list[str] | None,
     ) -> FetchResult:
-        """Common fetch logic for single-page methods (static vs rendered)."""
-        goto = _build_goto_options(goto_options)
-        if render:
-            pool = await self._ensure_browser_pool()
-            return await fetch_rendered(
-                url,
-                pool,
-                goto_options=goto,
-                wait_for_selector=wait_for_selector,
-                reject_resource_types=reject_resource_types,
-            )
-        return await fetch_static(url)
+        """Python-API adapter: lazy-init the pool then delegate to page_service."""
+        pool = await self._ensure_browser_pool() if render else None
+        return await fetch_page_html(
+            url,
+            render=render,
+            browser_pool=pool,
+            goto_options=_build_goto_options(goto_options),
+            wait_for_selector=wait_for_selector,
+            reject_resource_types=reject_resource_types,
+            max_response_size=self._max_response_size,
+        )
 
 
 def _build_goto_options(raw: dict[str, Any] | None) -> GotoOptions | None:
@@ -252,69 +257,3 @@ def _build_goto_options(raw: dict[str, Any] | None) -> GotoOptions | None:
     if raw is None:
         return None
     return GotoOptions(**raw)
-
-
-async def _collect_crawl_result(
-    job_id: str,
-    repo: SQLiteRepository,
-    storage: ContentStorage,
-    formats: Sequence[str],
-) -> CrawlResult:
-    """Fetch the final job state and all URL records, populating content fields."""
-    final_job = await repo.get_job(job_id)
-    status = final_job.status if final_job else JobStatus.ERRORED
-    total = final_job.total if final_job else 0
-    finished = final_job.finished if final_job else 0
-
-    all_records: list[CrawlRecord] = []
-    cursor: str | None = None
-    while True:
-        url_records, next_cursor = await repo.get_url_records(job_id, limit=100, cursor=cursor)
-        if not url_records:
-            break
-        for rec in url_records:
-            crawl_record = await _url_record_to_crawl_record(job_id, rec, storage, formats)
-            all_records.append(crawl_record)
-        cursor = next_cursor
-        if cursor is None:
-            break
-
-    return CrawlResult(
-        id=job_id,
-        status=status,
-        total=total,
-        finished=finished,
-        records=all_records,
-        cursor=None,
-    )
-
-
-async def _url_record_to_crawl_record(
-    job_id: str,
-    rec: UrlRecord,
-    storage: ContentStorage,
-    formats: Sequence[str],
-) -> CrawlRecord:
-    """Convert a UrlRecord into a CrawlRecord, reading content from storage."""
-    md_content: str | None = None
-    html_content: str | None = None
-    metadata: RecordMetadata | None = None
-
-    if rec.status == UrlStatus.COMPLETED:
-        if "markdown" in formats:
-            md_content = await storage.read(job_id, rec.url, "markdown")
-        if "html" in formats:
-            html_content = await storage.read(job_id, rec.url, "html")
-        metadata = RecordMetadata(
-            http_status=rec.http_status or 0,
-            title=rec.title,
-            content_hash=rec.content_hash,
-        )
-
-    return CrawlRecord(
-        url=rec.url,
-        status=rec.status,
-        markdown=md_content,
-        html=html_content,
-        metadata=metadata,
-    )

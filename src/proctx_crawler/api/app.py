@@ -12,7 +12,7 @@ from fastapi import FastAPI
 from proctx_crawler.api.errors import register_error_handlers
 from proctx_crawler.api.middleware import AuthMiddleware
 from proctx_crawler.api.routes import router
-from proctx_crawler.config import load_settings
+from proctx_crawler.config import Settings, load_settings
 from proctx_crawler.core.browser_pool import BrowserPool
 from proctx_crawler.infrastructure.content_storage import ContentStorage
 from proctx_crawler.infrastructure.sqlite_repository import SQLiteRepository
@@ -20,54 +20,65 @@ from proctx_crawler.infrastructure.sqlite_repository import SQLiteRepository
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from starlette.types import ASGIApp
+
 log: structlog.stdlib.BoundLogger = structlog.get_logger()
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    """Manage application-wide resources: repository, storage, browser pool, and task group."""
-    settings = load_settings()
-    repo = SQLiteRepository(settings.db_path)
-    await repo.initialise()
-    storage = ContentStorage(settings.output_dir)
-    browser_pool = BrowserPool(headless=settings.playwright_headless)
-    await browser_pool.start()
+def _build_lifespan(settings: Settings):  # type: ignore[no-untyped-def]
+    """Return a lifespan callable bound to the supplied settings instance."""
 
-    app.state.repo = repo
-    app.state.storage = storage
-    app.state.browser_pool = browser_pool
-    app.state.settings = settings
+    @asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Manage application-wide resources: repo, storage, browser pool, task group."""
+        repo = SQLiteRepository(settings.db_path)
+        await repo.initialise()
+        storage = ContentStorage(settings.output_dir)
+        browser_pool = BrowserPool(headless=settings.playwright_headless)
 
-    log.info(
-        "app_started",
-        host=settings.server_host,
-        port=settings.server_port,
-    )
+        app.state.repo = repo
+        app.state.storage = storage
+        app.state.browser_pool = browser_pool
+        app.state.settings = settings
 
-    async with anyio.create_task_group() as tg:
-        app.state.task_group = tg
-        yield
+        log.info(
+            "app_started",
+            host=settings.server_host,
+            port=settings.server_port,
+        )
 
-    await browser_pool.stop()
-    await repo.close()
-    log.info("app_stopped")
+        async with anyio.create_task_group() as tg:
+            app.state.task_group = tg
+            yield
+
+        await browser_pool.stop()
+        await repo.close()
+        log.info("app_stopped")
+
+    return lifespan
 
 
-def create_app() -> FastAPI:
-    """Build and return the configured FastAPI application."""
-    app = FastAPI(title="ProContext Crawler", lifespan=lifespan)
+def create_app(settings: Settings | None = None) -> ASGIApp:
+    """Build and return the configured FastAPI application.
+
+    Args:
+        settings: Optional pre-built Settings instance. When ``None``,
+            configuration is loaded via ``load_settings()`` (environment
+            variables, ``proctx-crawler.yaml``, defaults).
+
+    Returns:
+        An ASGI application. When ``auth_api_key`` is configured the FastAPI
+        app is wrapped in ``AuthMiddleware`` and the return type is the
+        wrapped ASGI callable rather than the bare FastAPI instance.
+    """
+    resolved = settings if settings is not None else load_settings()
+
+    app = FastAPI(title="ProContext Crawler", lifespan=_build_lifespan(resolved))
     app.include_router(router)
     register_error_handlers(app)
+    app.state.settings = resolved
 
-    # Auth middleware is applied at create_app time if settings provide an API key.
-    # We load settings here just to check; the lifespan will also load them.
-    settings = load_settings()
-    if settings.auth_api_key:
-        app = FastAPI(title="ProContext Crawler", lifespan=lifespan)
-        app.include_router(router)
-        register_error_handlers(app)
-        app.state.auth_api_key = settings.auth_api_key
-        # Wrap with ASGI middleware — must wrap the full app
-        return AuthMiddleware(app, api_key=settings.auth_api_key)  # type: ignore[return-value]
+    if resolved.auth_api_key:
+        return AuthMiddleware(app, api_key=resolved.auth_api_key)
 
     return app

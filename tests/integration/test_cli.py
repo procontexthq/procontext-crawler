@@ -262,6 +262,7 @@ class TestServeCommand:
         assert args.port == 9000
 
     def test_serve_defaults(self) -> None:
+        """Without flags, host/port fall through to Settings defaults (None on args)."""
         with (
             patch("proctx_crawler.cli.configure_logging"),
             patch("proctx_crawler.cli._run_serve") as mock_serve,
@@ -269,5 +270,5 @@ class TestServeCommand:
             main(["serve"])
 
         args = mock_serve.call_args[0][0]
-        assert args.host == "127.0.0.1"
-        assert args.port == 8080
+        assert args.host is None
+        assert args.port is None

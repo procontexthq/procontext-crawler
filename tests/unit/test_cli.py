@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from proctx_crawler.cli import _build_parser, main
+from proctx_crawler.cli import _build_parser, _resolve_settings, main
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     import pytest
 
 
@@ -41,7 +40,8 @@ class TestParser:
         assert args.render is False
         assert args.include is None
         assert args.exclude is None
-        assert args.output is None
+        assert args.output_dir is None
+        assert args.db_path is None
         assert args.quiet is False
 
     def test_crawl_with_all_options(self) -> None:
@@ -65,8 +65,10 @@ class TestParser:
                 "**/docs/**",
                 "--exclude",
                 "**/blog/**",
-                "--output",
+                "--output-dir",
                 "/tmp/out",
+                "--db-path",
+                "/tmp/crawler.db",
                 "--quiet",
             ]
         )
@@ -77,7 +79,8 @@ class TestParser:
         assert args.render is True
         assert args.include == ["**/docs/**"]
         assert args.exclude == ["**/blog/**"]
-        assert args.output == "/tmp/out"
+        assert args.output_dir == Path("/tmp/out")
+        assert args.db_path == Path("/tmp/crawler.db")
         assert args.quiet is True
 
     def test_format_default(self) -> None:
@@ -144,11 +147,14 @@ class TestParser:
         assert args.external is True
 
     def test_serve_defaults(self) -> None:
+        """Serve flags default to None so Settings values take effect."""
         parser = _build_parser()
         args = parser.parse_args(["serve"])
         assert args.command == "serve"
-        assert args.host == "127.0.0.1"
-        assert args.port == 8080
+        assert args.host is None
+        assert args.port is None
+        assert args.db_path is None
+        assert args.output_dir is None
 
     def test_serve_custom(self) -> None:
         parser = _build_parser()
@@ -510,7 +516,7 @@ class TestServeCommand:
         assert call_args.port == 3000
 
     def test_serve_default_host_port(self) -> None:
-        """Default serve args use 127.0.0.1:8080."""
+        """Default serve args leave host/port as None so Settings defaults win."""
         with (
             patch("proctx_crawler.cli.configure_logging"),
             patch("proctx_crawler.cli._run_serve") as mock_serve,
@@ -519,11 +525,12 @@ class TestServeCommand:
 
         mock_serve.assert_called_once()
         call_args = mock_serve.call_args[0][0]
-        assert call_args.host == "127.0.0.1"
-        assert call_args.port == 8080
+        assert call_args.host is None
+        assert call_args.port is None
 
     def test_run_serve_calls_uvicorn(self) -> None:
-        """_run_serve imports uvicorn and create_app, then calls uvicorn.run."""
+        """_run_serve resolves Settings from CLI overrides and starts uvicorn."""
+        import argparse
         import types
 
         from proctx_crawler.cli import _run_serve
@@ -532,7 +539,12 @@ class TestServeCommand:
         mock_uvicorn = types.ModuleType("uvicorn")
         mock_uvicorn.run = MagicMock()  # type: ignore[attr-defined]
 
-        args = MagicMock(host="0.0.0.0", port=9090)
+        args = argparse.Namespace(
+            host="0.0.0.0",
+            port=9090,
+            db_path=None,
+            output_dir=None,
+        )
 
         with (
             patch.dict("sys.modules", {"uvicorn": mock_uvicorn}),
@@ -587,3 +599,80 @@ class TestLoggingConfig:
             main(["serve"])
 
         mock_log_config.assert_called_once_with(level="INFO")
+
+
+# ---------------------------------------------------------------------------
+# Settings resolution
+# ---------------------------------------------------------------------------
+
+
+class TestResolveSettings:
+    """Verify _resolve_settings applies CLI overrides onto the base Settings."""
+
+    def test_returns_base_when_no_overrides(self) -> None:
+        """With all flags unset, _resolve_settings returns load_settings() unchanged."""
+        import argparse
+
+        args = argparse.Namespace(db_path=None, output_dir=None, host=None, port=None)
+
+        base = MagicMock()
+        with patch("proctx_crawler.cli.load_settings", return_value=base):
+            resolved = _resolve_settings(args)
+
+        assert resolved is base
+        base.model_copy.assert_not_called()
+
+    def test_applies_db_path_and_output_dir_overrides(self) -> None:
+        """CLI flags take precedence over env/YAML defaults."""
+        import argparse
+
+        args = argparse.Namespace(
+            db_path=Path("/tmp/override.db"),
+            output_dir=Path("/tmp/override-out"),
+            host=None,
+            port=None,
+        )
+
+        base = MagicMock()
+        updated = MagicMock()
+        base.model_copy.return_value = updated
+
+        with patch("proctx_crawler.cli.load_settings", return_value=base):
+            resolved = _resolve_settings(args)
+
+        base.model_copy.assert_called_once_with(
+            update={
+                "db_path": Path("/tmp/override.db"),
+                "output_dir": Path("/tmp/override-out"),
+            }
+        )
+        assert resolved is updated
+
+    def test_applies_host_and_port_overrides(self) -> None:
+        """Serve host/port flags override server_host/server_port in Settings."""
+        import argparse
+
+        args = argparse.Namespace(db_path=None, output_dir=None, host="0.0.0.0", port=9090)
+
+        base = MagicMock()
+        base.model_copy.return_value = MagicMock()
+
+        with patch("proctx_crawler.cli.load_settings", return_value=base):
+            _resolve_settings(args)
+
+        base.model_copy.assert_called_once_with(
+            update={"server_host": "0.0.0.0", "server_port": 9090}
+        )
+
+    def test_missing_attributes_do_not_crash(self) -> None:
+        """_resolve_settings uses getattr, so subcommands without host/port still work."""
+        import argparse
+
+        # crawl-style args: no host/port attributes at all
+        args = argparse.Namespace(db_path=None, output_dir=None)
+
+        base = MagicMock()
+        with patch("proctx_crawler.cli.load_settings", return_value=base):
+            resolved = _resolve_settings(args)
+
+        assert resolved is base

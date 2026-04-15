@@ -54,11 +54,13 @@ async def _seed_queue(
     queue: deque[QueueEntry],
     visited: set[str],
     repo: Repository,
+    *,
+    max_response_size: int,
 ) -> None:
     """Populate the BFS queue with seed URLs based on the configured source strategy."""
     if job.config.source == "llms_txt":
         # Fetch the starting URL to get llms.txt content, then parse for seed URLs.
-        page = await fetch_static(job.url)
+        page = await fetch_static(job.url, max_response_size=max_response_size)
         seed_urls = await discover_seed_urls(job.url, "llms_txt", page.html)
     else:
         seed_urls = await discover_seed_urls(job.url, job.config.source)
@@ -75,6 +77,8 @@ async def _fetch_page(
     url: str,
     job: Job,
     browser_pool: BrowserPool | None,
+    *,
+    max_response_size: int,
 ) -> tuple[str, int]:
     """Fetch a page via static or rendered path. Returns ``(html, status_code)``."""
     if job.config.render and browser_pool is not None:
@@ -86,7 +90,7 @@ async def _fetch_page(
             reject_resource_types=job.config.reject_resource_types,
         )
     else:
-        result = await fetch_static(url)
+        result = await fetch_static(url, max_response_size=max_response_size)
     return result.html, result.status_code
 
 
@@ -111,6 +115,7 @@ async def run_crawl(
     repo: Repository,
     storage: ContentStorage,
     browser_pool: BrowserPool | None = None,
+    max_response_size: int = 10_485_760,
 ) -> None:
     """Execute a BFS crawl for the given job.
 
@@ -132,7 +137,7 @@ async def run_crawl(
 
     # -- Phase 1: Seed the queue -----------------------------------------------
     try:
-        await _seed_queue(job, queue, visited, repo)
+        await _seed_queue(job, queue, visited, repo, max_response_size=max_response_size)
     except CrawlerError as exc:
         log.error("seed_failed", error=exc.message, exc_info=True)
         await repo.update_job_status(job.id, JobStatus.ERRORED)
@@ -158,7 +163,12 @@ async def run_crawl(
         await repo.update_url_status(job.id, entry.url, UrlStatus.RUNNING)
 
         try:
-            html, status_code = await _fetch_page(entry.url, job, browser_pool)
+            html, status_code = await _fetch_page(
+                entry.url,
+                job,
+                browser_pool,
+                max_response_size=max_response_size,
+            )
 
             content = _extract_content(html, job.config.formats)
             await storage.write(job.id, entry.url, content)

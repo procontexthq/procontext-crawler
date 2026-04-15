@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import aiosqlite
 import pytest
 
 from proctx_crawler.core.url_utils import url_hash
@@ -264,6 +265,32 @@ class TestGetUrlRecords:
         assert len(all_urls) == 5
 
     @pytest.mark.anyio()
+    async def test_cursor_pagination_with_live_inserts(self, repo: SQLiteRepository) -> None:
+        job = _make_job()
+        await repo.create_job(job)
+
+        await repo.enqueue_url(job.id, "https://example.com/page0", depth=0)
+        await repo.enqueue_url(job.id, "https://example.com/page1", depth=0)
+
+        page1, cursor1 = await repo.get_url_records(job.id, limit=1)
+        assert [record.url for record in page1] == ["https://example.com/page0"]
+        assert cursor1 is not None
+
+        await repo.enqueue_url(job.id, "https://example.com/page2", depth=0)
+        await repo.enqueue_url(job.id, "https://example.com/page3", depth=0)
+
+        page2, cursor2 = await repo.get_url_records(job.id, limit=2, cursor=cursor1)
+        assert [record.url for record in page2] == [
+            "https://example.com/page1",
+            "https://example.com/page2",
+        ]
+        assert cursor2 is not None
+
+        page3, cursor3 = await repo.get_url_records(job.id, limit=2, cursor=cursor2)
+        assert [record.url for record in page3] == ["https://example.com/page3"]
+        assert cursor3 is None
+
+    @pytest.mark.anyio()
     async def test_status_filter(self, repo: SQLiteRepository) -> None:
         job = _make_job()
         await repo.create_job(job)
@@ -452,6 +479,32 @@ class TestInitialiseError:
             mock_sqlite.Error = Exception
             await r.initialise()
 
+    @pytest.mark.anyio()
+    async def test_initialise_creates_missing_parent_directories(self, tmp_path: Path) -> None:
+        """First-run with a nested db_path must create parent dirs, not fail."""
+        nested = tmp_path / "does" / "not" / "exist" / "crawler.db"
+        assert not nested.parent.exists()
+
+        r = SQLiteRepository(nested)
+        await r.initialise()
+        try:
+            assert nested.parent.exists()
+            assert nested.exists()
+        finally:
+            await r.close()
+
+    @pytest.mark.anyio()
+    async def test_initialise_wraps_mkdir_oserror(self, tmp_path: Path) -> None:
+        """When parent dir cannot be created, initialise() still raises CrawlerError."""
+        # Create a file where the parent directory would need to be — mkdir then
+        # raises NotADirectoryError (an OSError subclass).
+        blocker = tmp_path / "blocker"
+        blocker.write_text("not a dir")
+
+        r = SQLiteRepository(blocker / "sub" / "crawler.db")
+        with pytest.raises(CrawlerError, match="Failed to initialise"):
+            await r.initialise()
+
 
 class TestCloseError:
     @pytest.mark.anyio()
@@ -460,27 +513,49 @@ class TestCloseError:
         r = SQLiteRepository(tmp_path / "test.db")
         await r.initialise()
 
-        # Replace _db.close with a raiser
-        import aiosqlite
-
+        # Capture the real close before patching so we can shut the worker
+        # thread down cleanly after the assertion. Without this, aiosqlite's
+        # background thread remains alive and can emit a spurious
+        # "Event loop is closed" warning during session finalisation.
+        real_close = r._db.close  # type: ignore[union-attr]
         r._db.close = AsyncMock(side_effect=aiosqlite.Error("close failed"))  # type: ignore[union-attr]
 
         await r.close()  # Should not raise
         assert r._db is None
 
+        await real_close()
+
 
 # ---------------------------------------------------------------------------
 # CRUD error handling (mock _db to raise aiosqlite.Error)
+#
+# These tests assert that infrastructure errors from aiosqlite are wrapped in
+# our domain CrawlerError. They do NOT use the ``repo`` fixture because it
+# opens a real aiosqlite connection whose background worker thread can emit
+# a spurious "Event loop is closed" warning during session finalisation when
+# execute() is patched. Using an isolated repo with a fully-mocked ``_db``
+# sidesteps the worker thread entirely.
 # ---------------------------------------------------------------------------
+
+
+def _errored_repo(tmp_path: Path, message: str) -> SQLiteRepository:
+    """Build a repo whose ``_db.execute`` raises aiosqlite.Error.
+
+    Avoids creating a real aiosqlite connection so no worker thread is spawned.
+    """
+    repo = SQLiteRepository(tmp_path / "test.db")
+    db = AsyncMock()
+    db.execute = AsyncMock(side_effect=aiosqlite.Error(message))
+    db.commit = AsyncMock()
+    repo._db = db
+    return repo
 
 
 class TestCreateJobError:
     @pytest.mark.anyio()
-    async def test_create_job_db_error(self, repo: SQLiteRepository) -> None:
+    async def test_create_job_db_error(self, tmp_path: Path) -> None:
         """aiosqlite.Error during create_job is wrapped in CrawlerError."""
-        import aiosqlite
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("write failed"))  # type: ignore[union-attr]
+        repo = _errored_repo(tmp_path, "write failed")
 
         with pytest.raises(CrawlerError, match="Failed to create job"):
             await repo.create_job(_make_job())
@@ -488,10 +563,8 @@ class TestCreateJobError:
 
 class TestGetJobError:
     @pytest.mark.anyio()
-    async def test_get_job_db_error(self, repo: SQLiteRepository) -> None:
-        import aiosqlite
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("read failed"))  # type: ignore[union-attr]
+    async def test_get_job_db_error(self, tmp_path: Path) -> None:
+        repo = _errored_repo(tmp_path, "read failed")
 
         with pytest.raises(CrawlerError, match="Failed to get job"):
             await repo.get_job("job-1")
@@ -499,38 +572,26 @@ class TestGetJobError:
 
 class TestUpdateJobStatusError:
     @pytest.mark.anyio()
-    async def test_update_job_status_db_error(self, repo: SQLiteRepository) -> None:
-        import aiosqlite
-
-        job = _make_job()
-        await repo.create_job(job)
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("write failed"))  # type: ignore[union-attr]
+    async def test_update_job_status_db_error(self, tmp_path: Path) -> None:
+        repo = _errored_repo(tmp_path, "write failed")
 
         with pytest.raises(CrawlerError, match="Failed to update job"):
-            await repo.update_job_status(job.id, JobStatus.RUNNING)
+            await repo.update_job_status("job-1", JobStatus.RUNNING)
 
 
 class TestUpdateJobCountsError:
     @pytest.mark.anyio()
-    async def test_update_job_counts_db_error(self, repo: SQLiteRepository) -> None:
-        import aiosqlite
-
-        job = _make_job()
-        await repo.create_job(job)
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("write failed"))  # type: ignore[union-attr]
+    async def test_update_job_counts_db_error(self, tmp_path: Path) -> None:
+        repo = _errored_repo(tmp_path, "write failed")
 
         with pytest.raises(CrawlerError, match="Failed to update job"):
-            await repo.update_job_counts(job.id, total=5, finished=2)
+            await repo.update_job_counts("job-1", total=5, finished=2)
 
 
 class TestIsJobCancelledError:
     @pytest.mark.anyio()
-    async def test_is_job_cancelled_db_error(self, repo: SQLiteRepository) -> None:
-        import aiosqlite
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("read failed"))  # type: ignore[union-attr]
+    async def test_is_job_cancelled_db_error(self, tmp_path: Path) -> None:
+        repo = _errored_repo(tmp_path, "read failed")
 
         with pytest.raises(CrawlerError, match="Failed to check cancellation"):
             await repo.is_job_cancelled("job-1")
@@ -538,24 +599,17 @@ class TestIsJobCancelledError:
 
 class TestEnqueueUrlError:
     @pytest.mark.anyio()
-    async def test_enqueue_url_db_error(self, repo: SQLiteRepository) -> None:
-        import aiosqlite
-
-        job = _make_job()
-        await repo.create_job(job)
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("write failed"))  # type: ignore[union-attr]
+    async def test_enqueue_url_db_error(self, tmp_path: Path) -> None:
+        repo = _errored_repo(tmp_path, "write failed")
 
         with pytest.raises(CrawlerError, match="Failed to enqueue URL"):
-            await repo.enqueue_url(job.id, "https://example.com/page", depth=0)
+            await repo.enqueue_url("job-1", "https://example.com/page", depth=0)
 
 
 class TestGetUrlRecordsError:
     @pytest.mark.anyio()
-    async def test_get_url_records_db_error(self, repo: SQLiteRepository) -> None:
-        import aiosqlite
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("read failed"))  # type: ignore[union-attr]
+    async def test_get_url_records_db_error(self, tmp_path: Path) -> None:
+        repo = _errored_repo(tmp_path, "read failed")
 
         with pytest.raises(CrawlerError, match="Failed to get URL records"):
             await repo.get_url_records("job-1")
@@ -563,55 +617,35 @@ class TestGetUrlRecordsError:
 
 class TestUpdateUrlStatusError:
     @pytest.mark.anyio()
-    async def test_update_url_status_db_error(self, repo: SQLiteRepository) -> None:
-        import aiosqlite
-
-        job = _make_job()
-        await repo.create_job(job)
-        await repo.enqueue_url(job.id, "https://example.com/a", depth=0)
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("write failed"))  # type: ignore[union-attr]
+    async def test_update_url_status_db_error(self, tmp_path: Path) -> None:
+        repo = _errored_repo(tmp_path, "write failed")
 
         with pytest.raises(CrawlerError, match="Failed to update URL"):
-            await repo.update_url_status(job.id, "https://example.com/a", UrlStatus.RUNNING)
+            await repo.update_url_status("job-1", "https://example.com/a", UrlStatus.RUNNING)
 
 
 class TestMarkUrlCompletedError:
     @pytest.mark.anyio()
-    async def test_mark_url_completed_db_error(self, repo: SQLiteRepository) -> None:
-        import aiosqlite
-
-        job = _make_job()
-        await repo.create_job(job)
-        await repo.enqueue_url(job.id, "https://example.com/a", depth=0)
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("write failed"))  # type: ignore[union-attr]
+    async def test_mark_url_completed_db_error(self, tmp_path: Path) -> None:
+        repo = _errored_repo(tmp_path, "write failed")
 
         with pytest.raises(CrawlerError, match="Failed to mark URL"):
-            await repo.mark_url_completed(job.id, "https://example.com/a", http_status=200)
+            await repo.mark_url_completed("job-1", "https://example.com/a", http_status=200)
 
 
 class TestMarkUrlErroredError:
     @pytest.mark.anyio()
-    async def test_mark_url_errored_db_error(self, repo: SQLiteRepository) -> None:
-        import aiosqlite
-
-        job = _make_job()
-        await repo.create_job(job)
-        await repo.enqueue_url(job.id, "https://example.com/a", depth=0)
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("write failed"))  # type: ignore[union-attr]
+    async def test_mark_url_errored_db_error(self, tmp_path: Path) -> None:
+        repo = _errored_repo(tmp_path, "write failed")
 
         with pytest.raises(CrawlerError, match="Failed to mark URL"):
-            await repo.mark_url_errored(job.id, "https://example.com/a", "timeout")
+            await repo.mark_url_errored("job-1", "https://example.com/a", "timeout")
 
 
 class TestCancelQueuedUrlsError:
     @pytest.mark.anyio()
-    async def test_cancel_queued_urls_db_error(self, repo: SQLiteRepository) -> None:
-        import aiosqlite
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("write failed"))  # type: ignore[union-attr]
+    async def test_cancel_queued_urls_db_error(self, tmp_path: Path) -> None:
+        repo = _errored_repo(tmp_path, "write failed")
 
         with pytest.raises(CrawlerError, match="Failed to cancel queued URLs"):
             await repo.cancel_queued_urls("job-1")
@@ -619,10 +653,8 @@ class TestCancelQueuedUrlsError:
 
 class TestGetJobCountsError:
     @pytest.mark.anyio()
-    async def test_get_job_counts_db_error(self, repo: SQLiteRepository) -> None:
-        import aiosqlite
-
-        repo._db.execute = AsyncMock(side_effect=aiosqlite.Error("read failed"))  # type: ignore[union-attr]
+    async def test_get_job_counts_db_error(self, tmp_path: Path) -> None:
+        repo = _errored_repo(tmp_path, "read failed")
 
         with pytest.raises(CrawlerError, match="Failed to get job counts"):
             await repo.get_job_counts("job-1")

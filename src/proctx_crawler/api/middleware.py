@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import secrets
 from typing import TYPE_CHECKING
 
 from proctx_crawler.models import ErrorCode, ErrorDetail, ErrorResponse
@@ -35,7 +36,7 @@ class AuthMiddleware:
         headers = dict(scope.get("headers", []))
         auth_value = headers.get(b"authorization", b"").decode()
 
-        if auth_value == f"Bearer {self._api_key}":
+        if secrets.compare_digest(auth_value, f"Bearer {self._api_key}"):
             await self._app(scope, receive, send)
             return
 

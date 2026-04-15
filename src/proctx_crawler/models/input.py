@@ -39,7 +39,7 @@ class CrawlConfig(BaseModel):
 
 
 class SinglePageInput(BaseModel):
-    """Shared input for /markdown, /content, /links."""
+    """Shared input for /markdown and /content."""
 
     url: str | None = None
     html: str | None = None
@@ -58,7 +58,15 @@ class SinglePageInput(BaseModel):
 
 
 class LinksInput(SinglePageInput):
-    """Input for POST /links."""
+    """Input for POST /links. Unlike SinglePageInput, url is required."""
 
     visible_links_only: bool = False
     exclude_external_links: bool = False
+
+    @model_validator(mode="after")
+    def url_required(self) -> Self:
+        if not self.url:
+            raise ValueError("'url' is required for /links")
+        if self.html is not None:
+            raise ValueError("Provide 'url' only for /links; raw 'html' is not supported")
+        return self

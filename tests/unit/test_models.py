@@ -270,6 +270,10 @@ class TestLinksInput:
         assert inp.visible_links_only is True
         assert inp.exclude_external_links is False
 
+    def test_rejects_html_only(self) -> None:
+        with pytest.raises(ValidationError):
+            LinksInput(html="<a href='https://example.com'>x</a>")
+
 
 # ---------------------------------------------------------------------------
 # JobStatus / Job

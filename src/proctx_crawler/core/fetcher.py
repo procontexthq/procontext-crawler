@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
 import httpx
@@ -10,6 +11,9 @@ from pydantic import BaseModel
 
 from proctx_crawler.core.ssrf import resolve_and_check_ip, validate_url_scheme
 from proctx_crawler.models import ErrorCode, FetchError
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
 
 log = structlog.get_logger()
 
@@ -24,6 +28,34 @@ class FetchResult(BaseModel):
     status_code: int
     html: str
     headers: dict[str, str]
+
+
+async def _read_limited_response(
+    response: httpx.Response, *, max_response_size: int
+) -> tuple[bytes, int]:
+    """Read the response body incrementally and fail as soon as it exceeds the limit."""
+    chunks: list[bytes] = []
+    total_bytes = 0
+
+    async for chunk in _iter_response_bytes(response):
+        total_bytes += len(chunk)
+        if total_bytes > max_response_size:
+            raise FetchError(
+                code=ErrorCode.FETCH_FAILED,
+                message=(
+                    f"Response size {total_bytes} bytes exceeds limit of {max_response_size} bytes"
+                ),
+                recoverable=False,
+            )
+        chunks.append(chunk)
+
+    return b"".join(chunks), total_bytes
+
+
+async def _iter_response_bytes(response: httpx.Response) -> AsyncIterator[bytes]:
+    """Yield decoded response bytes from an httpx stream."""
+    async for chunk in response.aiter_bytes():
+        yield chunk
 
 
 async def fetch_static(
@@ -59,14 +91,50 @@ async def fetch_static(
         resolve_and_check_ip(hostname)
 
         try:
-            async with httpx.AsyncClient(
-                follow_redirects=False,
-                timeout=timeout,
-                headers={"User-Agent": USER_AGENT},
-                proxy=None,
-                trust_env=False,
-            ) as client:
-                response = await client.get(current_url)
+            async with (
+                httpx.AsyncClient(
+                    follow_redirects=False,
+                    timeout=timeout,
+                    headers={"User-Agent": USER_AGENT},
+                    proxy=None,
+                    trust_env=False,
+                ) as client,
+                client.stream("GET", current_url) as response,
+            ):
+                # Handle redirects manually so we can re-check SSRF on each hop.
+                if response.is_redirect:
+                    location = response.headers.get("location")
+                    if not location:
+                        raise FetchError(
+                            code=ErrorCode.FETCH_FAILED,
+                            message=(
+                                f"Redirect response {response.status_code} with no Location header"
+                            ),
+                            recoverable=False,
+                        )
+                    # Resolve relative redirects against the current URL.
+                    current_url = str(response.url.join(location))
+                    log.debug(
+                        "fetch_redirect",
+                        status=response.status_code,
+                        location=current_url,
+                    )
+                    continue
+
+                # Non-redirect response — check status and return.
+                _check_http_status(response)
+
+                body_bytes, _ = await _read_limited_response(
+                    response, max_response_size=max_response_size
+                )
+                body = body_bytes.decode(response.encoding or "utf-8", errors="replace")
+
+                return FetchResult(
+                    url=str(response.url),
+                    status_code=response.status_code,
+                    html=body,
+                    headers=dict(response.headers),
+                )
         except httpx.TimeoutException as exc:
             raise FetchError(
                 code=ErrorCode.FETCH_FAILED,
@@ -85,41 +153,6 @@ async def fetch_static(
                 message=f"HTTP error fetching {current_url}: {exc}",
                 recoverable=True,
             ) from exc
-
-        # Handle redirects manually so we can re-check SSRF on each hop.
-        if response.is_redirect:
-            location = response.headers.get("location")
-            if not location:
-                raise FetchError(
-                    code=ErrorCode.FETCH_FAILED,
-                    message=f"Redirect response {response.status_code} with no Location header",
-                    recoverable=False,
-                )
-            # Resolve relative redirects against the current URL.
-            current_url = str(response.url.join(location))
-            log.debug("fetch_redirect", status=response.status_code, location=current_url)
-            continue
-
-        # Non-redirect response — check status and return.
-        _check_http_status(response)
-
-        body = response.text
-        if len(response.content) > max_response_size:
-            raise FetchError(
-                code=ErrorCode.FETCH_FAILED,
-                message=(
-                    f"Response size {len(response.content)} bytes exceeds limit "
-                    f"of {max_response_size} bytes"
-                ),
-                recoverable=False,
-            )
-
-        return FetchResult(
-            url=str(response.url),
-            status_code=response.status_code,
-            html=body,
-            headers=dict(response.headers),
-        )
 
     raise FetchError(
         code=ErrorCode.FETCH_FAILED,

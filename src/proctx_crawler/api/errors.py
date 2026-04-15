@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from proctx_crawler.models import CrawlerError, ErrorCode, ErrorDetail, ErrorResponse
@@ -48,9 +49,24 @@ def _validation_error_handler(_request: Request, exc: ValidationError) -> JSONRe
     return JSONResponse(status_code=400, content=body.model_dump())
 
 
+def _request_validation_error_handler(
+    _request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    """Convert FastAPI request validation errors into an INVALID_INPUT 400 response."""
+    body = ErrorResponse(
+        error=ErrorDetail(
+            code=ErrorCode.INVALID_INPUT,
+            message=str(exc),
+            recoverable=False,
+        ),
+    )
+    return JSONResponse(status_code=400, content=body.model_dump())
+
+
 def register_error_handlers(app: FastAPI) -> None:
     """Attach exception handlers to the FastAPI application."""
     from pydantic import ValidationError
 
     app.add_exception_handler(CrawlerError, _crawler_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(ValidationError, _validation_error_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RequestValidationError, _request_validation_error_handler)  # pyright: ignore[reportArgumentType]

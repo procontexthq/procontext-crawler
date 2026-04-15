@@ -39,7 +39,7 @@ class BrowserPool:
     async def start(self) -> None:
         """Launch Playwright and the Chromium browser.
 
-        Called once during application startup.
+        Can be called eagerly, but the pool also self-starts lazily on first use.
         """
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(headless=self._headless)
@@ -48,7 +48,7 @@ class BrowserPool:
     async def stop(self) -> None:
         """Close the browser and Playwright.
 
-        Called during application shutdown.
+        Safe to call even if the browser was never started.
         """
         if self._browser:
             await self._browser.close()

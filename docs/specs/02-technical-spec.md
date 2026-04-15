@@ -2,7 +2,7 @@
 
 > **Document**: 02-technical-spec.md
 > **Status**: Draft v1
-> **Last Updated**: 2026-03-16
+> **Last Updated**: 2026-04-15
 > **Depends on**: 01-functional-spec.md
 
 ---
@@ -91,6 +91,16 @@
 │  └────────┼────────────────┼──────────────────┼─────────────┘  │
 │           │                │                  │                 │
 │  ┌────────▼────────────────▼──────────────────▼─────────────┐  │
+│  │  Services Layer (shared domain orchestration)            │  │
+│  │  ┌──────────────────────┐  ┌──────────────────────────┐  │  │
+│  │  │ page_service         │  │ crawl_service            │  │  │
+│  │  │ (fetch dispatch:     │  │ (job construction,       │  │  │
+│  │  │  static vs render)   │  │  record materialisation, │  │  │
+│  │  │                      │  │  result collection)      │  │  │
+│  │  └──────────┬───────────┘  └────────────┬─────────────┘  │  │
+│  └─────────────┼───────────────────────────┼────────────────┘  │
+│                │                           │                    │
+│  ┌─────────────▼───────────────────────────▼────────────────┐  │
 │  │  Core Layer                                              │  │
 │  │                                                          │  │
 │  │  ┌──────────────┐  ┌──────────────┐  ┌───────────────┐  │  │
@@ -120,9 +130,12 @@
 
 | Layer | Responsibility | Framework imports allowed |
 |-------|---------------|--------------------------|
-| Interface | Accept input, return output. Thin wrappers. | FastAPI, argparse |
-| Core | Business logic. Crawling, fetching, extracting. | None (zero framework imports) |
+| Interface | Accept input, return output. Thin adapters — HTTP routes adapt request/response, `Crawler` adapts async-context lifecycle and Python kwargs. No domain logic. | FastAPI, argparse |
+| Services | Shared domain orchestration called by both interface layers. Single-page fetch dispatch, job construction, record materialisation. | None |
+| Core | Low-level primitives. BFS crawl loop, fetchers, extractors. | None (zero framework imports) |
 | Infrastructure | Persistence, config, logging. | aiosqlite, pydantic-settings, structlog |
+
+**Why a services layer?** The HTTP API and Python API are two different adapters over the same domain. Without a services layer, each one reimplements job construction, fetch dispatch, and record mapping. The services layer is the single owner of those flows so the adapters stay thin and no logic is duplicated.
 
 ### 1.2 Request Flow: Single-Page
 
@@ -284,7 +297,7 @@ class GotoOptions(BaseModel):
     timeout: int = Field(default=30000, ge=1000, le=120000)
 
 class SinglePageInput(BaseModel):
-    """Shared input for /markdown, /content, /links."""
+    """Shared input for /markdown and /content."""
     url: str | None = None
     html: str | None = None
     render: bool = False
@@ -298,6 +311,18 @@ class SinglePageInput(BaseModel):
             raise ValueError("Either 'url' or 'html' must be provided")
         if self.url and self.html:
             raise ValueError("Provide 'url' or 'html', not both")
+        return self
+
+class LinksInput(SinglePageInput):
+    visible_links_only: bool = False
+    exclude_external_links: bool = False
+
+    @model_validator(mode="after")
+    def url_required(self) -> Self:
+        if not self.url:
+            raise ValueError("'url' is required for /links")
+        if self.html is not None:
+            raise ValueError("Provide 'url' only for /links; raw 'html' is not supported")
         return self
 ```
 
@@ -545,20 +570,31 @@ class FetchResult(BaseModel):
     html: str                         # Raw HTML body
     headers: dict[str, str]
 
-async def fetch_static(url: str, *, timeout: float = 30.0) -> FetchResult:
-    async with httpx.AsyncClient(
-        follow_redirects=True,
-        max_redirects=10,
-        timeout=timeout,
-    ) as client:
-        response = await client.get(url)
-        response.raise_for_status()
-        return FetchResult(
-            url=str(response.url),
-            status_code=response.status_code,
-            html=response.text,
-            headers=dict(response.headers),
-        )
+async def fetch_static(
+    url: str,
+    *,
+    timeout: float = 30.0,
+    max_response_size: int = 10_485_760,
+) -> FetchResult:
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        async with client.stream("GET", url) as response:
+            response.raise_for_status()
+
+            body = bytearray()
+            async for chunk in response.aiter_bytes():
+                body.extend(chunk)
+                if len(body) > max_response_size:
+                    raise FetchError(
+                        ErrorCode.FETCH_FAILED,
+                        f"Response size exceeds {max_response_size} bytes",
+                    )
+
+            return FetchResult(
+                url=str(response.url),
+                status_code=response.status_code,
+                html=body.decode(response.encoding or "utf-8", errors="replace"),
+                headers=dict(response.headers),
+            )
 ```
 
 **Configuration**:
@@ -566,7 +602,8 @@ async def fetch_static(url: str, *, timeout: float = 30.0) -> FetchResult:
 | Setting | Default | Description |
 |---------|---------|-------------|
 | Timeout | 30s | Per-request timeout |
-| Max redirects | 10 | Redirect chain limit |
+| Max redirects | 10 | Redirect chain limit (handled manually so each hop can be re-validated) |
+| Max response size | 10 MB | Static responses are streamed and rejected once the byte limit is exceeded |
 | User-Agent | `proctx-crawler/<version>` | Customisable in v0.2 |
 
 ### 5.2 Playwright Renderer
@@ -902,7 +939,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_url_records_job_url ON url_records(job_id,
 
 **WAL mode**: Enables concurrent reads while a write is in progress. Essential when the crawl engine is writing URL records while the API layer is reading job status.
 
-**Cursor pagination**: The cursor is a base64-encoded JSON object containing the `id` of the last returned record. The next query filters `WHERE id > :cursor ORDER BY id LIMIT :limit`.
+**Cursor pagination**: The cursor is an opaque token representing the last returned insertion-order position. The next query resumes from that stable position using SQLite row insertion order, which avoids skipping newly inserted records during a live crawl.
 
 ### 7.3 Filesystem Storage
 
@@ -1053,15 +1090,15 @@ When `GET /crawl?id=<job_id>` is called:
 ```python
 import base64, json
 
-def encode_cursor(last_id: str) -> str:
-    return base64.urlsafe_b64encode(json.dumps({"id": last_id}).encode()).decode()
+def encode_cursor(last_rowid: int) -> str:
+    return base64.urlsafe_b64encode(json.dumps({"rowid": last_rowid}).encode()).decode()
 
-def decode_cursor(cursor: str) -> str:
+def decode_cursor(cursor: str) -> int:
     data = json.loads(base64.urlsafe_b64decode(cursor))
-    return data["id"]
+    return int(data["rowid"])
 ```
 
-The cursor is opaque to the client. It encodes a position in the result set that is stable even as new records are inserted.
+The cursor is opaque to the client. It encodes a stable position in insertion order so pagination remains complete even while new URL records are being appended.
 
 ### 8.3 Cancellation
 
@@ -1075,18 +1112,9 @@ When `DELETE /crawl?id=<job_id>` is called:
 
 ### 8.4 Timeout and Cleanup
 
-**Job timeout**: A configurable maximum runtime per job (default: 1 hour). Enforced by a watchdog coroutine that runs alongside the crawl loop:
+**Job timeout**: A configurable maximum runtime per job (default: 1 hour). This setting exists in `Settings` but is not yet enforced in the v0.1 runtime.
 
-```python
-async def watchdog(job_id: str, repo: Repository, timeout: float):
-    await anyio.sleep(timeout)
-    await repo.update_job_status(job_id, JobStatus.CANCELLED)
-    await repo.cancel_queued_urls(job_id)
-```
-
-The watchdog and the crawl loop run in the same task group. If the crawl completes before the timeout, the task group cancels the watchdog.
-
-**Metadata cleanup**: Job records in the database older than the retention period (default: 7 days, configurable) are deleted by a periodic cleanup task. Content files on disk are NOT auto-deleted — they persist until the user removes them.
+**Metadata cleanup**: The retention setting also exists in `Settings` but is not yet enforced in the v0.1 runtime. Content files on disk are never auto-deleted by the current implementation.
 
 ---
 
@@ -1151,7 +1179,6 @@ async def lifespan(app: FastAPI):
     await repo.initialise()
     storage = ContentStorage(settings.output_dir)
     browser_pool = BrowserPool(headless=settings.playwright_headless)
-    await browser_pool.start()
 
     app.state.repo = repo
     app.state.storage = storage
@@ -1169,44 +1196,79 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="ProContext Crawler", lifespan=lifespan)
 ```
 
-**State injection**: `Repository`, `ContentStorage`, and `Settings` are created in the lifespan and stored on `app.state`. Route handlers access them via `request.app.state`. No global singletons.
+**State injection**: `Repository`, `ContentStorage`, `BrowserPool`, and `Settings` are created in the lifespan and stored on `app.state`. Route handlers access them via `request.app.state`. No global singletons.
+
+**Lazy browser startup**: The HTTP app now constructs the `BrowserPool` during lifespan startup but does not launch Chromium immediately. The pool starts itself on the first render request, so static-only deployments can serve requests without Playwright boot cost or a browser install at process start.
 
 ### 10.2 Routes
+
+Routes are thin HTTP adapters. They validate input with pydantic, pull shared resources off `app.state`, delegate to the services layer, and map results back to the response envelope. All job construction, fetch dispatch, and record materialisation lives in `core/crawl_service.py` and `core/page_service.py` — not in route bodies.
 
 ```python
 # api/routes.py
 
-@app.post("/crawl")
+from proctx_crawler.core.crawl_service import (
+    build_and_persist_job,
+    url_record_to_crawl_record,
+)
+from proctx_crawler.core.page_service import fetch_page_html
+
+@router.post("/crawl")
 async def start_crawl(config: CrawlConfig, request: Request) -> SuccessResponse[str]:
     repo = request.app.state.repo
     storage = request.app.state.storage
-    job_id = await create_crawl_job(config, repo)
-    # Start crawl in background
-    request.app.state.task_group.start_soon(run_crawl, job, repo, storage)
-    return SuccessResponse(result=job_id)
+    pool = request.app.state.browser_pool if config.render else None
+    job = await build_and_persist_job(config.url, config, repo)
+    # Scheduling model differs from the Python API: HTTP returns immediately,
+    # crawl runs in the lifespan-scoped task group.
+    request.app.state.task_group.start_soon(run_crawl, job, repo, storage, pool)
+    return SuccessResponse(result=job.id)
 
-@app.get("/crawl")
+@router.get("/crawl")
 async def poll_crawl(
-    id: str, limit: int = 100, cursor: str | None = None,
-    status: UrlStatus | None = None, request: Request,
+    request: Request,
+    id: str,
+    limit: int = 100,
+    cursor: str | None = None,
+    status: UrlStatus | None = None,
 ) -> SuccessResponse[CrawlResult]:
+    # Route owns pagination params; mapping each UrlRecord -> CrawlRecord
+    # uses the shared service function so HTTP and Python agree on shape.
     ...
 
-@app.delete("/crawl")
+@router.delete("/crawl")
 async def cancel_crawl(id: str, request: Request) -> SuccessResponse[str]:
     ...
 
-@app.post("/markdown")
-async def extract_markdown(input: SinglePageInput, request: Request) -> SuccessResponse[str]:
+@router.post("/markdown")
+async def extract_markdown(body: SinglePageInput, request: Request) -> SuccessResponse[str]:
+    # HTML-only shortcut stays in the route: it's a pure extractor call at
+    # the HTTP boundary, no domain logic worth sharing.
+    if body.html is not None:
+        return SuccessResponse(result=html_to_markdown(body.html))
+    result = await _fetch_single_page_html(body, request)
+    return SuccessResponse(result=html_to_markdown(result.html))
+
+@router.post("/content")
+async def extract_content(body: SinglePageInput, request: Request) -> SuccessResponse[str]:
     ...
 
-@app.post("/content")
-async def extract_content(input: SinglePageInput, request: Request) -> SuccessResponse[str]:
+@router.post("/links")
+async def extract_links(body: LinksInput, request: Request) -> SuccessResponse[list[str]]:
     ...
 
-@app.post("/links")
-async def extract_links(input: LinksInput, request: Request) -> SuccessResponse[list[str]]:
-    ...
+
+async def _fetch_single_page_html(body: SinglePageInput, request: Request) -> FetchResult:
+    """Adapt the HTTP request shape to the page_service call."""
+    pool = request.app.state.browser_pool if body.render else None
+    return await fetch_page_html(
+        body.url,
+        render=body.render,
+        browser_pool=pool,
+        goto_options=body.goto_options,
+        wait_for_selector=body.wait_for_selector,
+        reject_resource_types=body.reject_resource_types,
+    )
 ```
 
 **Error handling**: A global exception handler catches `CrawlerError` subclasses and returns the `ErrorResponse` envelope.
@@ -1232,7 +1294,7 @@ async def crawler_error_handler(request: Request, exc: CrawlerError) -> JSONResp
 
 ### 10.3 Middleware
 
-**Optional API key authentication**: When `PROCTX_CRAWLER__AUTH__API_KEY` is set, all requests must include `Authorization: Bearer <key>`. Implemented as ASGI middleware (not `BaseHTTPMiddleware`, to preserve SSE streaming for v0.3+).
+**Optional API key authentication**: When `PROCTX_CRAWLER__AUTH_API_KEY` is set, all requests must include `Authorization: Bearer <key>`. Implemented as ASGI middleware (not `BaseHTTPMiddleware`, to preserve SSE streaming for v0.3+). Token comparison uses `secrets.compare_digest`.
 
 **CORS**: Disabled by default. Configurable via settings for browser-based consumers.
 
@@ -1242,7 +1304,9 @@ async def crawler_error_handler(request: Request, exc: CrawlerError) -> JSONResp
 
 ### 11.1 Crawler Class
 
-The primary interface. Usable without the HTTP server.
+The primary Python-facing interface. Usable without the HTTP server.
+
+The class is a **thin adapter**: it owns the lifecycle of per-instance resources (repo, storage, lazily-initialised browser pool), applies the Settings-merge contract to constructor kwargs, and delegates all domain work to `core/page_service.py` and `core/crawl_service.py`. It does not reimplement job construction, fetch dispatch, or record materialisation — those live in the services layer so the HTTP API and Python API share a single source of truth.
 
 ```python
 # crawler.py
@@ -1251,14 +1315,17 @@ class Crawler:
     def __init__(
         self,
         *,
+        settings: Settings | None = None,
         output_dir: Path | None = None,
         db_path: Path | None = None,
     ):
-        self._settings = load_settings()
+        # Priority: explicit kwargs > injected Settings > load_settings()
+        self._settings = settings or load_settings()
         self._output_dir = output_dir or self._settings.output_dir
         self._db_path = db_path or self._settings.db_path
         self._repo: Repository | None = None
         self._storage: ContentStorage | None = None
+        self._browser_pool: BrowserPool | None = None
 
     async def __aenter__(self) -> Crawler:
         self._repo = SQLiteRepository(self._db_path)
@@ -1267,8 +1334,17 @@ class Crawler:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
+        if self._browser_pool:
+            await self._browser_pool.stop()
         if self._repo:
             await self._repo.close()
+
+    async def _ensure_browser_pool(self) -> BrowserPool:
+        """Lazily start Chromium the first time render=True is requested."""
+        if self._browser_pool is None:
+            self._browser_pool = BrowserPool(headless=self._settings.playwright_headless)
+            await self._browser_pool.start()
+        return self._browser_pool
 ```
 
 ### 11.2 Async Context Manager
@@ -1284,7 +1360,12 @@ async with Crawler() as crawler:
 
 ### 11.3 Single-Page Methods
 
+Each public method is ~5 lines of delegation to the services layer.
+
 ```python
+from proctx_crawler.core.crawl_service import build_and_persist_job, collect_crawl_result
+from proctx_crawler.core.page_service import fetch_page_html
+
 class Crawler:
     ...
 
@@ -1300,30 +1381,52 @@ class Crawler:
         **kwargs: Any,
     ) -> CrawlResult:
         """Start a crawl and wait for completion. Returns the full result."""
+        resolved_formats = formats or ["markdown"]
         config = CrawlConfig(url=url, limit=limit, depth=depth, source=source,
-                             formats=formats or ["markdown"], render=render, **kwargs)
-        job_id = await create_crawl_job(config, self._repo)
-        job = await self._repo.get_job(job_id)
-        await run_crawl(job, self._repo, self._storage)
-        return await self._build_result(job_id)
+                             formats=resolved_formats, render=render, **kwargs)
+        job = await build_and_persist_job(url, config, self._repo)
+        pool = await self._ensure_browser_pool() if render else None
+        await run_crawl(job, self._repo, self._storage, pool)
+        return await collect_crawl_result(job.id, self._repo, self._storage, resolved_formats)
 
     async def markdown(self, url: str, *, render: bool = False, **kwargs: Any) -> str:
         """Fetch a single page and return Markdown."""
-        page = await self._fetch(url, render=render, **kwargs)
+        page = await self._fetch_page(url, render=render, **kwargs)
         return html_to_markdown(page.html)
 
     async def content(self, url: str, *, render: bool = False, **kwargs: Any) -> str:
         """Fetch a single page and return rendered HTML."""
-        page = await self._fetch(url, render=render, **kwargs)
+        page = await self._fetch_page(url, render=render, **kwargs)
         return page.html
 
     async def links(self, url: str, *, render: bool = False, **kwargs: Any) -> list[str]:
         """Fetch a single page and return all links."""
-        page = await self._fetch(url, render=render, **kwargs)
+        page = await self._fetch_page(url, render=render, **kwargs)
         return extract_links(page.html, url)
+
+    async def _fetch_page(
+        self,
+        url: str,
+        *,
+        render: bool,
+        goto_options: dict[str, Any] | None = None,
+        wait_for_selector: str | None = None,
+        reject_resource_types: list[str] | None = None,
+    ) -> FetchResult:
+        pool = await self._ensure_browser_pool() if render else None
+        return await fetch_page_html(
+            url,
+            render=render,
+            browser_pool=pool,
+            goto_options=_build_goto_options(goto_options),
+            wait_for_selector=wait_for_selector,
+            reject_resource_types=reject_resource_types,
+        )
 ```
 
 **Blocking behaviour**: Unlike the HTTP API (which returns a job ID and runs the crawl in the background), the Python API's `crawl()` method is `await`-able and blocks until the crawl is complete. For non-blocking use, callers can use `anyio.create_task_group()` to run crawls concurrently.
+
+**Scheduling split is intentional, not duplication**: `run_crawl` is invoked directly from both adapters but with different scheduling — `await` in the Python API (blocking contract) vs `task_group.start_soon` in the HTTP API (return-job-id contract). That's a legitimate contract difference at the adapter boundary, so it stays out of the services layer.
 
 ---
 
@@ -1425,8 +1528,10 @@ class Settings(BaseSettings):
     # Crawl defaults
     default_limit: int = 10
     default_depth: int = 1000
-    job_timeout: int = 3600           # seconds (1 hour)
-    metadata_retention_days: int = 7
+    job_timeout: int = 3600           # defined, not yet enforced in v0.1
+    max_concurrent_jobs: int = 10     # defined, not yet enforced in v0.1
+    max_response_size: int = 10485760 # enforced on static fetches
+    metadata_retention_days: int = 7  # defined, not yet enforced in v0.1
 
     # Auth (optional)
     auth_api_key: str | None = None
