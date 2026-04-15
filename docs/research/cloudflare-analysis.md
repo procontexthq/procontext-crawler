@@ -11,19 +11,19 @@ Cloudflare has 9 endpoints. Here's how each maps to our use case.
 
 ### Adopt (build our version)
 
-| CF Endpoint | Our Version | Rationale |
-|-------------|-------------|-----------|
-| `/crawl` | `/crawl` | Core feature. Async job-based multi-page crawl. This is the whole point. |
+| CF Endpoint | Our Version | Rationale                                                                                |
+| ----------- | ----------- | ---------------------------------------------------------------------------------------- |
+| `/crawl`    | `/crawl`    | Core feature. Async job-based multi-page crawl. This is the whole point.                 |
 | `/markdown` | `/markdown` | Single-page Markdown extraction. Useful standalone and as a building block for `/crawl`. |
-| `/content` | `/content` | Single-page rendered HTML fetch. Foundation for everything else. |
-| `/links` | `/links` | Link extraction from a page. Useful standalone, and it's how the crawler discovers URLs. |
+| `/content`  | `/content`  | Single-page rendered HTML fetch. Foundation for everything else.                         |
+| `/links`    | `/links`    | Link extraction from a page. Useful standalone, and it's how the crawler discovers URLs. |
 
 ### Adapt (build differently)
 
-| CF Endpoint | Our Approach | Rationale |
-|-------------|--------------|-----------|
-| `/scrape` | Skip for v0.1, maybe v0.2 | CSS selector extraction is useful but not core to our doc-crawling use case. Can add later. |
-| `/json` | Skip for v0.1, maybe v0.3 | AI-powered extraction requires an LLM backend. Out of scope initially. Could be powerful later for structured doc extraction. |
+| CF Endpoint | Our Approach              | Rationale                                                                                                                     |
+| ----------- | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `/scrape`   | Skip for v0.1, maybe v0.2 | CSS selector extraction is useful but not core to our doc-crawling use case. Can add later.                                   |
+| `/json`     | Skip for v0.1, maybe v0.3 | AI-powered extraction requires an LLM backend. Out of scope initially. Could be powerful later for structured doc extraction. |
 
 ### Skip (not in scope)
 
@@ -76,11 +76,11 @@ Cloudflare has 9 endpoints. Here's how each maps to our use case.
 
 ### Authentication
 
-| CF Feature | Adopt? | Notes |
-|------------|--------|-------|
-| `authenticate` (HTTP Basic) | **v0.2** | Some doc sites are gated. |
-| `cookies` | **v0.2** | Token-based auth for gated docs. |
-| `setExtraHTTPHeaders` | **v0.2** | Custom headers (API keys, auth tokens). |
+| CF Feature                  | Adopt?   | Notes                                   |
+| --------------------------- | -------- | --------------------------------------- |
+| `authenticate` (HTTP Basic) | **v0.2** | Some doc sites are gated.               |
+| `cookies`                   | **v0.2** | Token-based auth for gated docs.        |
+| `setExtraHTTPHeaders`       | **v0.2** | Custom headers (API keys, auth tokens). |
 
 ### Job Lifecycle
 

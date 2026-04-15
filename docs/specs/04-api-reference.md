@@ -2,7 +2,7 @@
 
 > **Document**: 04-api-reference.md
 > **Status**: Draft v1
-> **Last Updated**: 2026-03-16
+> **Last Updated**: 2026-04-15
 > **Depends on**: 01-functional-spec.md, 02-technical-spec.md
 
 ---
@@ -54,7 +54,7 @@ Configurable via `PROCTX_CRAWLER__SERVER_HOST` and `PROCTX_CRAWLER__SERVER_PORT`
 
 ### 1.2 Authentication
 
-Authentication is **optional**. When `PROCTX_CRAWLER__AUTH__API_KEY` is set, all requests must include:
+Authentication is **optional**. When `PROCTX_CRAWLER__AUTH_API_KEY` is set, all requests must include:
 
 ```
 Authorization: Bearer <api-key>
@@ -89,6 +89,8 @@ All error responses share this structure:
   }
 }
 ```
+
+Malformed request bodies are normalised into this same envelope with HTTP `400` and error code `INVALID_INPUT`.
 
 See [Section 15](#15-error-reference) for the full error catalogue.
 
@@ -246,7 +248,7 @@ GET /crawl?id=<job-id>&limit=100&cursor=<cursor>&status=completed
         }
       }
     ],
-    "cursor": "eyJpZCI6ICIxMjM0NTY3OCJ9"
+    "cursor": "opaque-cursor-token"
   }
 }
 ```
@@ -265,7 +267,7 @@ GET /crawl?id=<job-id>&limit=100&cursor=<cursor>&status=completed
 | `result.records[].markdown` | string\|null | Markdown content (if requested) |
 | `result.records[].html` | string\|null | HTML content (if requested) |
 | `result.records[].metadata` | object\|null | Page metadata |
-| `result.cursor` | string\|null | Next page cursor (`null` when no more) |
+| `result.cursor` | string\|null | Next page cursor (`null` when no more). Opaque; clients must not parse it. |
 
 ### Errors
 
@@ -283,7 +285,7 @@ curl "http://localhost:8080/crawl?id=550e8400-e29b-41d4-a716-446655440000&limit=
 curl "http://localhost:8080/crawl?id=550e8400-e29b-41d4-a716-446655440000&limit=10"
 
 # Get next page
-curl "http://localhost:8080/crawl?id=550e8400-e29b-41d4-a716-446655440000&limit=10&cursor=eyJpZCI6ICIxMjM0NTY3OCJ9"
+curl "http://localhost:8080/crawl?id=550e8400-e29b-41d4-a716-446655440000&limit=10&cursor=<opaque-cursor>"
 
 # Get only completed records
 curl "http://localhost:8080/crawl?id=550e8400-e29b-41d4-a716-446655440000&status=completed"
@@ -481,11 +483,13 @@ Content-Type: application/json
 }
 ```
 
-**Parameters**: All single-page base parameters (Section 5), plus:
+`/links` requires `url`. Unlike `/markdown` and `/content`, it does not accept raw `html` input because relative link resolution depends on a base URL.
+
+**Parameters**: URL-based single-page parameters plus:
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `visible_links_only` | boolean | No | `false` | Only visible links (render only) |
+| `visible_links_only` | boolean | No | `false` | Only links not clearly invisible (render only). Filters anchors hidden via `hidden`, `aria-hidden="true"`, `display:none`, `visibility:hidden/collapse`, or no layout box. |
 | `exclude_external_links` | boolean | No | `false` | Filter out cross-domain links |
 
 ### Response

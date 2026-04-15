@@ -1,80 +1,185 @@
 # ProContext Crawler
 
-A self-hosted crawl API for extracting structured documentation from websites. Given an llms.txt URL (or any starting URL), the crawler discovers all linked pages, fetches them (with optional JavaScript rendering via Playwright), and returns clean Markdown, raw HTML, or structured JSON.
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+[![Type checked: pyright](https://img.shields.io/badge/types-pyright-blue.svg)](https://github.com/microsoft/pyright)
+[![Status: alpha](https://img.shields.io/badge/status-alpha-orange.svg)](#project-status)
 
-Inspired by [Cloudflare's Browser Rendering /crawl endpoint](https://developers.cloudflare.com/browser-rendering/rest-api/crawl-endpoint/), built for the [ProContext](https://github.com/procontexthq/procontext) ecosystem.
+A self-hosted crawl API for extracting structured documentation from websites. Given a starting URL, ProContext Crawler discovers linked pages, fetches them (with optional JavaScript rendering via Playwright), and returns clean Markdown, raw HTML, or a list of links — suitable for feeding into LLMs and documentation pipelines.
 
-## What It Does
+Inspired by [Cloudflare's Browser Rendering `/crawl` endpoint](https://developers.cloudflare.com/browser-rendering/rest-api/crawl-endpoint/), built for the [ProContext](https://github.com/procontexthq/procontext) ecosystem.
 
-- **Crawl from a starting URL** — discovers linked pages up to a configurable depth and page limit
-- **Multiple output formats** — Markdown, HTML, JSON (structured data extraction)
-- **JavaScript rendering** — Playwright-backed headless browser for dynamic/SPA pages
-- **Fast static mode** — skip the browser for static pages (`render: false`)
-- **URL filtering** — include/exclude patterns, subdomain control, external link following
-- **Async job API** — POST to start, GET to poll, DELETE to cancel
-- **robots.txt compliance** — respects crawl directives by default
-- **Caching** — configurable TTL to avoid redundant fetches
-- **Authentication support** — HTTP Basic, custom headers, cookies for gated docs
+## Why ProContext Crawler?
 
-## Project Structure
+Most crawl tools fall into one of two camps: hosted SaaS APIs that ship your URLs to a vendor, or research-grade frameworks that require deep configuration before you get anything useful out. ProContext Crawler is deliberately neither.
 
-```
-src/proctx_crawler/
-    __init__.py
-    config.py            # Settings (pydantic-settings, YAML + env vars)
-    errors.py            # Typed error hierarchy
-    logging_config.py    # structlog setup (JSON to stderr)
+- **Self-hosted, no vendor.** Run the HTTP API, import the Python class, or pipe from the CLI — your data never leaves your infrastructure.
+- **Documentation-shaped, not SEO-shaped.** The defaults (link discovery, `llms.txt` seeding, nav/footer stripping, Markdown output) are tuned for producing LLM-ingestible docs, not generic web scraping.
+- **Dual fetch paths by design.** Most pages never need a browser. Static fetch via `httpx` is the fast default; opt into Playwright only when you need it.
+- **Small surface, few dependencies.** One package, one SQLite file, one output directory. No queue workers, no Redis, no Docker required.
 
-    api/                 # HTTP API layer (FastAPI)
-        __init__.py
-        app.py           # FastAPI app, lifespan, routes
-        models.py        # Request/response schemas
+## Features
 
-    core/                # Business logic (no framework imports)
-        __init__.py
-        crawler.py       # Crawl orchestration (BFS/DFS, depth, limits)
-        scheduler.py     # Job lifecycle (create, poll, cancel, cleanup)
-        fetcher.py       # HTTP fetcher (httpx, redirect handling, SSRF)
-        renderer.py      # Playwright browser rendering
-        cache.py         # SQLite page cache (WAL mode)
-        robots.py        # robots.txt parser and compliance
+- **Multi-page BFS crawl** — discover linked pages up to a configurable depth and page limit
+- **Multiple output formats** — Markdown, raw HTML, or link lists
+- **Dual fetch paths** — fast static fetch via `httpx` (default) or full JavaScript rendering via Playwright (`render: true`)
+- **llms.txt discovery** — seed a crawl from an `llms.txt` index instead of following links
+- **URL filtering** — include/exclude glob patterns (exclude wins), subdomain control, external link toggling
+- **Async job lifecycle** — POST to start, GET to poll, DELETE to cancel; cursor-based pagination for results
+- **Three interfaces** — Python API (`Crawler` async context manager), HTTP API (FastAPI), and CLI (`proctx-crawler …`)
+- **Persistence** — SQLite (WAL mode) for job/URL metadata, filesystem for page content plus a per-job `manifest.json`
+- **Security** — SSRF protection on the static path (private IP blocking, per-hop redirect re-check), response size limits, optional API-key auth
 
-    extractors/          # Content extraction pipeline
-        __init__.py
-        markdown.py      # HTML-to-Markdown conversion
-        html.py          # Raw HTML extraction / cleanup
-        json_extract.py  # Structured data extraction
+## Installation
 
-    models/              # Shared Pydantic models
-        __init__.py
-        job.py           # Job, CrawlResult, URL status
-        page.py          # Page content, metadata
-
-tests/
-    unit/                # Pure logic tests (no I/O)
-    integration/         # Full pipeline tests
-
-docs/
-    specs/               # Design specifications (write before building)
-```
-
-## Quick Start
+Requires Python 3.12+ and [`uv`](https://docs.astral.sh/uv/).
 
 ```bash
-# Install dependencies
 uv sync --dev
 
-# Run the API server
-uv run proctx-crawler
+# For Playwright rendering, install the Chromium browser once
+uv run playwright install chromium
+```
 
-# Run tests
+## Quickstart
+
+### CLI
+
+```bash
+# Extract a single page as Markdown
+uv run proctx-crawler markdown https://example.com/docs
+
+# Fetch raw HTML
+uv run proctx-crawler content https://example.com/docs
+
+# List links on a page (use --external to include off-site links)
+uv run proctx-crawler links https://example.com/docs
+
+# Crawl a documentation site (depth and page-limit bounded)
+uv run proctx-crawler crawl https://example.com/docs \
+    --limit 50 --depth 3 \
+    --format markdown --format html \
+    --include "*/docs/*" --exclude "*/changelog*" \
+    --output-dir ./out
+
+# Seed from an llms.txt index instead of link discovery
+uv run proctx-crawler crawl https://example.com/llms.txt --source llms_txt
+
+# Start the HTTP API server
+uv run proctx-crawler serve --host 127.0.0.1 --port 8080
+```
+
+Add `--render` to any subcommand to route through Playwright for JavaScript-heavy pages.
+
+### Python API
+
+```python
+import anyio
+from proctx_crawler import Crawler
+
+
+async def main() -> None:
+    async with Crawler() as c:
+        # Single-page extraction
+        md = await c.markdown("https://example.com/docs")
+        html = await c.content("https://example.com/docs")
+        links = await c.links("https://example.com/docs")
+
+        # Multi-page crawl
+        result = await c.crawl(
+            "https://example.com/docs",
+            limit=50,
+            depth=3,
+            formats=["markdown"],
+            render=False,
+            options={
+                "include_patterns": ["*/docs/*"],
+                "exclude_patterns": ["*/changelog*"],
+            },
+        )
+        print(f"Crawled {result.finished}/{result.total} pages")
+
+
+anyio.run(main)
+```
+
+### HTTP API
+
+```bash
+# Start a crawl
+curl -X POST http://127.0.0.1:8080/crawl \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com/docs", "limit": 20}'
+# → {"success": true, "result": "<job-id>"}
+
+# Poll status and paginated results
+curl "http://127.0.0.1:8080/crawl?id=<job-id>&limit=50"
+
+# Cancel a running job
+curl -X DELETE "http://127.0.0.1:8080/crawl?id=<job-id>"
+
+# Single-page endpoints
+curl -X POST http://127.0.0.1:8080/markdown -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com/docs"}'
+curl -X POST http://127.0.0.1:8080/content  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com/docs"}'
+curl -X POST http://127.0.0.1:8080/links    -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com/docs"}'
+```
+
+See [`docs/specs/04-api-reference.md`](docs/specs/04-api-reference.md) for the full request/response schemas and error envelope.
+
+## Configuration
+
+Settings load from (in priority order): CLI flags / constructor arguments, environment variables (`PROCTX_CRAWLER__*`), then `proctx-crawler.yaml` in the working directory.
+
+Every subcommand accepts `--db-path PATH` and `--output-dir PATH` to override `db_path` and `output_dir` for a single invocation; `serve` additionally accepts `--host` and `--port`.
+
+| Setting | Default | Description |
+|---|---|---|
+| `output_dir` | `<platformdirs data>/jobs` | Where crawl content is written |
+| `db_path` | `<platformdirs data>/crawler.db` | SQLite metadata store |
+| `server_host` / `server_port` | `127.0.0.1` / `8080` | API bind address |
+| `default_limit` / `default_depth` | `10` / `1000` | Defined in settings, but not yet enforced as shared runtime defaults |
+| `job_timeout` | `3600` | Defined in settings, but not yet enforced by a watchdog |
+| `max_concurrent_jobs` | `10` | Defined in settings for future scheduling controls; not yet enforced |
+| `max_response_size` | `10 MB` | Enforced per-response byte ceiling on the static fetch path |
+| `metadata_retention_days` | `7` | Defined in settings for future cleanup; not yet enforced |
+| `auth_api_key` | `null` | When set, required as `Authorization: Bearer …` |
+| `playwright_headless` | `true` | Run Chromium headless |
+
+Example env var: `PROCTX_CRAWLER__AUTH_API_KEY=secret uv run proctx-crawler serve`.
+
+## Project Status
+
+**v0.1 — alpha.** All v0.1 scope is implemented and tested (see [`docs/specs/01-functional-spec.md`](docs/specs/01-functional-spec.md) §4.1). The public Python, HTTP, and CLI surfaces are in place, but we reserve the right to make breaking changes until v1.0. Track planned work in the roadmap section of the functional spec.
+
+## Documentation
+
+- [Functional specification](docs/specs/01-functional-spec.md) — what the crawler does
+- [Technical specification](docs/specs/02-technical-spec.md) — architecture and internals
+- [API reference](docs/specs/04-api-reference.md) — wire format and error envelope
+- [Security specification](docs/specs/05-security-spec.md) — threat model and controls
+
+## Development
+
+```bash
+# Tests
 uv run pytest
 
-# Lint + format + type check
+# Tests with coverage (≥90% branch coverage required)
+uv run pytest --cov=src/proctx_crawler --cov-fail-under=90
+
+# Lint, format, type check
 uv run ruff check src/ tests/
 uv run ruff format src/ tests/
 uv run pyright src/
 ```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, workflow, coding conventions, and PR guidelines. The project follows a spec-first process — read the relevant document in [`docs/specs/`](docs/specs/) before starting non-trivial work.
 
 ## License
 
