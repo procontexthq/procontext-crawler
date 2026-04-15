@@ -107,3 +107,6 @@ playwright-browsers/
 
 # Obsidian
 .obsidian
+
+# Duplicated skills for codex
+.agents
