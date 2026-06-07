@@ -105,19 +105,25 @@ class ContentStorage:
         job_path.mkdir(parents=True, exist_ok=True)
 
         pages: dict[str, dict[str, Any]] = {}
+        requested_formats = config_data.get("formats", [])
+        if not isinstance(requested_formats, list):
+            requested_formats = []
+
         for record in records:
             if record.get("status") == "completed":
                 h = self.url_hash(record["url"])
+                files: dict[str, str] = {}
+                if "markdown" in requested_formats and (job_path / f"{h}.md").exists():
+                    files["markdown"] = f"{h}.md"
+                if "html" in requested_formats and (job_path / f"{h}.html").exists():
+                    files["html"] = f"{h}.html"
                 pages[h] = {
                     "url": record["url"],
                     "status": record["status"],
                     "http_status": record.get("http_status"),
                     "title": record.get("title"),
                     "content_hash": record.get("content_hash"),
-                    "files": {
-                        "markdown": f"{h}.md",
-                        "html": f"{h}.html",
-                    },
+                    "files": files,
                 }
 
         manifest: dict[str, Any] = {
@@ -146,8 +152,6 @@ class ContentStorage:
         """Raise if *path* resolves outside the output directory (S14)."""
         resolved = path.resolve()
         output_resolved = self._output_dir.resolve()
-        resolved_str = str(resolved)
-        prefix = str(output_resolved) + "/"
-        if resolved != output_resolved and not resolved_str.startswith(prefix):
+        if resolved != output_resolved and not resolved.is_relative_to(output_resolved):
             msg = f"Path traversal detected: {path} resolves outside {self._output_dir}"
             raise ValueError(msg)

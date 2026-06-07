@@ -261,7 +261,7 @@ For fetching gated or authenticated content. Apply to both static and rendered f
 | `url` | string | Yes | — | Starting URL. Can be any webpage or an llms.txt index. |
 | `limit` | integer | No | 10 | Maximum number of pages to crawl. |
 | `depth` | integer | No | 1000 | Maximum link hops from the starting URL. |
-| `source` | string | No | `"links"` | URL discovery strategy: `"links"`, `"llms_txt"`, `"sitemaps"` [v0.2], `"all"` [v0.2]. |
+| `source` | string | No | `"links"` | URL discovery strategy. v0.1 accepts `"links"` and `"llms_txt"` only. `"sitemaps"` and `"all"` are v0.2 roadmap values and are rejected in v0.1. |
 | `formats` | array | No | `["markdown"]` | Output formats per page: `"markdown"`, `"html"`. `"json"` added in v0.3. |
 | `render` | boolean | No | `false` | Use Playwright for all pages in this crawl. |
 | `goto_options` | object | No | — | Rendering params (see Section 6.2). Apply to all pages when `render: true`. |
@@ -278,8 +278,8 @@ For fetching gated or authenticated content. Apply to both static and rendered f
 |--------|----------|
 | `"links"` | Parse HTML `<a>` tags from each fetched page to discover new URLs. Default. |
 | `"llms_txt"` | Parse the starting URL as an llms.txt file. Extract all documentation links listed in it. Do not follow HTML links from individual pages. |
-| `"sitemaps"` [v0.2] | Parse `sitemap.xml` from the starting URL's domain to discover URLs. |
-| `"all"` [v0.2] | Combine all discovery strategies: sitemaps first, then HTML links for pages not found via sitemap, with llms.txt auto-detected if the starting URL matches the format. |
+| `"sitemaps"` [v0.2] | Roadmap only. v0.1 rejects this value with `INVALID_INPUT`. |
+| `"all"` [v0.2] | Roadmap only. v0.1 rejects this value with `INVALID_INPUT`. |
 
 **URL pattern matching**:
 
@@ -305,8 +305,8 @@ For fetching gated or authenticated content. Apply to both static and rendered f
    f. Mark URL as `completed` in DB
    g. Discover new URLs from the page (per `source` strategy)
    h. Enqueue newly discovered URLs (that pass pattern filtering and haven't been visited)
-   i. Stop if `limit` reached or queue exhausted
-4. Set job status to `completed`
+   i. Stop if `limit` reached, queue exhausted, job cancelled, or cooperative job timeout expires
+4. Set job status to `completed`, or `cancelled` when stopped by cancellation/timeout
 
 **Output**:
 
@@ -675,7 +675,9 @@ Content files for completed URLs are preserved on disk.
 
 ### 8.5 Job Timeout and Cleanup
 
-- Default job timeout: 1 hour (configurable). Jobs exceeding the timeout are cancelled automatically.
+- Default job timeout: 1 hour (configurable, minimum 1 second).
+- Timeout enforcement is cooperative. The engine checks the deadline before starting each queued URL and again after each URL completes. It does not abort an in-flight fetch or render.
+- When timeout expires, queued URLs are moved to `cancelled`, job counts are updated, `manifest.json` is written, and the job status becomes `cancelled`.
 - Content files persist on disk until explicitly deleted. No auto-expiry.
 - Job metadata in the DB can be cleaned up via a configurable retention period (default: 7 days).
 

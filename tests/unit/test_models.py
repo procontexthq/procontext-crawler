@@ -222,6 +222,11 @@ class TestCrawlConfig:
         restored = CrawlConfig.model_validate(data)
         assert restored == cfg
 
+    @pytest.mark.parametrize("source", ["sitemaps", "all"])
+    def test_v02_sources_rejected_in_v01(self, source: str) -> None:
+        with pytest.raises(ValidationError):
+            CrawlConfig(url="https://example.com", source=source)  # type: ignore[arg-type]
+
 
 # ---------------------------------------------------------------------------
 # SinglePageInput

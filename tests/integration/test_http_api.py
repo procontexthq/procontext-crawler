@@ -55,7 +55,11 @@ async def test_app(
     app.state.repo = repo
     app.state.storage = storage
     app.state.browser_pool = browser_pool
-    app.state.settings = MagicMock(auth_api_key=None, max_response_size=10_485_760)
+    app.state.settings = MagicMock(
+        auth_api_key=None,
+        max_response_size=10_485_760,
+        job_timeout=3600,
+    )
 
     # Patch fetcher in routes and engine modules
     async def _mock_fetch(url: str, **_kwargs: object) -> FetchResult:

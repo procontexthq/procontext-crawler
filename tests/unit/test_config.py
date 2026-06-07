@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING
+
+import pytest
+from pydantic import ValidationError
 
 from proctx_crawler.config import Settings, load_settings
-
-if TYPE_CHECKING:
-    import pytest
 
 
 class TestSettings:
@@ -45,3 +44,7 @@ class TestSettings:
         settings = Settings()
         assert settings.server_port == 9090
         assert settings.auth_api_key == "secret-key"
+
+    def test_job_timeout_must_be_positive(self) -> None:
+        with pytest.raises(ValidationError):
+            Settings(job_timeout=0)

@@ -29,7 +29,7 @@ class CrawlConfig(BaseModel):
     url: str
     limit: int = Field(default=10, ge=1)
     depth: int = Field(default=1000, ge=0)
-    source: Literal["links", "llms_txt", "sitemaps", "all"] = "links"
+    source: Literal["links", "llms_txt"] = "links"
     formats: list[Literal["markdown", "html"]] = ["markdown"]
     render: bool = False
     goto_options: GotoOptions | None = None

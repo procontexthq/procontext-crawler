@@ -236,6 +236,27 @@ class TestFetchRenderedErrors:
         assert exc_info.value.recoverable is True
 
     @pytest.mark.anyio
+    async def test_render_error_message_redacts_url_parts(self) -> None:
+        pool = _make_mock_pool()
+
+        mock_cm = pool.acquire_context()
+        mock_context = await mock_cm.__aenter__()
+        mock_page = await mock_context.new_page()
+        mock_page.goto = AsyncMock(
+            side_effect=Exception(
+                "Navigation failed for https://user:secret@example.com/page?token=abc#frag"
+            )
+        )
+
+        with pytest.raises(RenderError) as exc_info:
+            await fetch_rendered("https://user:secret@example.com/page?token=abc#frag", pool)
+
+        assert "https://example.com/page" in exc_info.value.message
+        assert "user:secret" not in exc_info.value.message
+        assert "token=abc" not in exc_info.value.message
+        assert "#frag" not in exc_info.value.message
+
+    @pytest.mark.anyio
     async def test_render_error_not_double_wrapped(self) -> None:
         """If a RenderError is raised internally, it should not be wrapped again."""
         pool = _make_mock_pool()

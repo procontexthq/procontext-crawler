@@ -9,7 +9,7 @@ import pytest
 
 from proctx_crawler.core.fetcher import FetchResult
 from proctx_crawler.core.page_service import fetch_page_html
-from proctx_crawler.models import GotoOptions
+from proctx_crawler.models import ErrorCode, GotoOptions, RenderError
 
 if TYPE_CHECKING:
     from pytest_mock import MockerFixture
@@ -85,5 +85,7 @@ class TestFetchPageHtml:
 
     @pytest.mark.anyio
     async def test_rendered_without_pool_raises(self) -> None:
-        with pytest.raises(RuntimeError, match="browser_pool is required"):
+        with pytest.raises(RenderError, match="browser_pool is required") as exc_info:
             await fetch_page_html("https://example.com", render=True, browser_pool=None)
+        assert exc_info.value.code == ErrorCode.RENDER_FAILED
+        assert exc_info.value.recoverable is False

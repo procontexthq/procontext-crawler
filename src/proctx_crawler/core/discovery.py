@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 from proctx_crawler.core.url_utils import is_same_domain, is_subdomain, matches_patterns
 from proctx_crawler.extractors.links import extract_links
@@ -11,7 +12,11 @@ _MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\((https?://[^)]+)\)")
 _BARE_URL_RE = re.compile(r"https?://[^\s>)\]]+")
 
 
-async def discover_seed_urls(url: str, source: str, html: str | None = None) -> list[str]:
+async def discover_seed_urls(
+    url: str,
+    source: Literal["links", "llms_txt"],
+    html: str | None = None,
+) -> list[str]:
     """Discover seed URLs based on the source strategy.
 
     For 'links': return [url] (the starting URL itself is the only seed)
@@ -25,7 +30,8 @@ async def discover_seed_urls(url: str, source: str, html: str | None = None) -> 
             return [url]
         return parse_llms_txt(html)
 
-    return [url]
+    msg = f"Unsupported discovery source: {source}"
+    raise ValueError(msg)
 
 
 def parse_llms_txt(text: str) -> list[str]:

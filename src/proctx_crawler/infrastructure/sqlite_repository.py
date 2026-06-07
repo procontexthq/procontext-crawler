@@ -241,6 +241,16 @@ class SQLiteRepository:
                     """,
                     {"status": status.value, "now": now, "id": job_id},
                 )
+            elif status == JobStatus.RUNNING:
+                await self._conn().execute(
+                    """
+                    UPDATE jobs
+                    SET status = :status, updated_at = :now,
+                        started_at = COALESCE(started_at, :now)
+                    WHERE id = :id
+                    """,
+                    {"status": status.value, "now": now, "id": job_id},
+                )
             else:
                 await self._conn().execute(
                     "UPDATE jobs SET status = :status, updated_at = :now WHERE id = :id",
@@ -294,6 +304,26 @@ class SQLiteRepository:
                 f"Failed to check cancellation for job {job_id}",
             ) from None
 
+    async def list_jobs(self, *, limit: int = 100, offset: int = 0) -> list[Job]:
+        """Return persisted jobs, newest first."""
+        try:
+            cursor = await self._conn().execute(
+                """
+                SELECT rowid, * FROM jobs
+                ORDER BY created_at DESC, rowid DESC
+                LIMIT :limit OFFSET :offset
+                """,
+                {"limit": limit, "offset": offset},
+            )
+            rows = await cursor.fetchall()
+            return [_row_to_job(row) for row in rows]
+        except aiosqlite.Error:
+            log.error("sqlite_list_jobs_failed", exc_info=True)
+            raise CrawlerError(
+                ErrorCode.FETCH_FAILED,
+                "Failed to list jobs",
+            ) from None
+
     # -- URL record operations ------------------------------------------------
 
     async def enqueue_url(self, job_id: str, url: str, depth: int) -> None:
@@ -334,7 +364,8 @@ class SQLiteRepository:
         """Return paginated URL records, optionally filtered by *status*."""
         try:
             conditions = ["job_id = :job_id"]
-            params: dict[str, str | int] = {"job_id": job_id, "limit": limit}
+            query_limit = limit + 1
+            params: dict[str, str | int] = {"job_id": job_id, "limit": query_limit}
 
             if cursor is not None:
                 last_rowid = _decode_cursor(cursor)
@@ -353,12 +384,14 @@ class SQLiteRepository:
 
             db_cursor = await self._conn().execute(query, params)
             rows = list(await db_cursor.fetchall())
+            has_more = len(rows) > limit
+            returned_rows = rows[:limit]
 
-            records = [_row_to_url_record(row) for row in rows]
+            records = [_row_to_url_record(row) for row in returned_rows]
 
             next_cursor: str | None = None
-            if len(records) == limit:
-                next_cursor = _encode_cursor(rows[-1]["_cursor_rowid"])
+            if has_more and returned_rows:
+                next_cursor = _encode_cursor(returned_rows[-1]["_cursor_rowid"])
 
             return records, next_cursor
         except aiosqlite.Error:

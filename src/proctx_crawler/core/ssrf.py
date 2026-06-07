@@ -14,20 +14,22 @@ log = structlog.get_logger()
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
-_PRIVATE_NETWORKS_V4 = [
+_EXPLICIT_BLOCKED_NETWORKS_V4 = [
     ipaddress.IPv4Network("127.0.0.0/8"),
     ipaddress.IPv4Network("10.0.0.0/8"),
     ipaddress.IPv4Network("172.16.0.0/12"),
     ipaddress.IPv4Network("192.168.0.0/16"),
     ipaddress.IPv4Network("169.254.0.0/16"),
     ipaddress.IPv4Network("100.64.0.0/10"),
+    ipaddress.IPv4Network("198.18.0.0/15"),
 ]
 
-_PRIVATE_NETWORKS_V6 = [
+_EXPLICIT_BLOCKED_NETWORKS_V6 = [
     ipaddress.IPv6Network("::1/128"),
     ipaddress.IPv6Network("fc00::/7"),
     ipaddress.IPv6Network("fe80::/10"),
 ]
+_NAT64_WELL_KNOWN_PREFIX = ipaddress.IPv6Network("64:ff9b::/96")
 
 
 def validate_url_scheme(url: str) -> None:
@@ -59,11 +61,31 @@ def is_private_ip(ip: str) -> bool:
     if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
         addr = addr.ipv4_mapped
 
+    if isinstance(addr, ipaddress.IPv6Address) and addr in _NAT64_WELL_KNOWN_PREFIX:
+        embedded_v4 = ipaddress.IPv4Address(int(addr) & 0xFFFFFFFF)
+        return is_private_ip(str(embedded_v4))
+
     if isinstance(addr, ipaddress.IPv4Address):
-        return any(addr in network for network in _PRIVATE_NETWORKS_V4)
+        return (
+            addr.is_unspecified
+            or addr.is_loopback
+            or addr.is_private
+            or addr.is_link_local
+            or addr.is_multicast
+            or addr.is_reserved
+            or any(addr in network for network in _EXPLICIT_BLOCKED_NETWORKS_V4)
+        )
 
     # IPv6 address
-    return any(addr in network for network in _PRIVATE_NETWORKS_V6)
+    return (
+        addr.is_unspecified
+        or addr.is_loopback
+        or addr.is_private
+        or addr.is_link_local
+        or addr.is_multicast
+        or addr.is_reserved
+        or any(addr in network for network in _EXPLICIT_BLOCKED_NETWORKS_V6)
+    )
 
 
 def resolve_and_check_ip(hostname: str) -> str:

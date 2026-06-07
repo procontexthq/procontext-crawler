@@ -147,7 +147,7 @@ These are the conventions that trip people up. Standard Python practices (PEP 8,
 
 - **Layered design.** API (FastAPI) → `Crawler` class → core engine → fetchers/extractors. Core modules have zero framework imports. A lower layer never reaches into a higher one.
 - **Repository protocol.** Job and URL metadata persistence is typed against the `Repository` protocol in `core/repository.py`. The SQLite implementation lives in `infrastructure/`. Write new storage backends against the protocol, never against `SQLiteRepository` directly.
-- **Dependency injection at `Crawler`.** The `Crawler` class receives its repository, content store, browser pool, and fetcher as constructor arguments. No module-level singletons, no global state.
+- **Crawler as a thin adapter.** The `Crawler` class accepts settings and path overrides, owns the lifecycle of its repository, content store, and lazy browser pool, and delegates domain work to core services. No module-level singletons, no global state.
 - **Dual fetch paths.** Static fetch via `httpx` is the default. Playwright is behind `render=True` and the browser pool is lazily initialised on first use — code paths that never render must not force browser startup.
 
 ### Error handling

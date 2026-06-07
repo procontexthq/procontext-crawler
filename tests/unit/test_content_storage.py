@@ -181,11 +181,16 @@ class TestWriteManifest:
                 "content_hash": "abc123",
             },
         ]
+        await storage.write(
+            "job1",
+            "https://example.com/page1",
+            ExtractedContent(markdown="# Page 1", html="<h1>Page 1</h1>"),
+        )
 
         await storage.write_manifest(
             job_id="job1",
             url=url,
-            config_data={"limit": 10},
+            config_data={"limit": 10, "formats": ["markdown", "html"]},
             total=1,
             finished=1,
             status="completed",
@@ -203,7 +208,7 @@ class TestWriteManifest:
         assert manifest["url"] == url
         assert manifest["created_at"] == "2026-03-16T10:00:00+00:00"
         assert manifest["finished_at"] == "2026-03-16T10:05:00+00:00"
-        assert manifest["config"] == {"limit": 10}
+        assert manifest["config"] == {"limit": 10, "formats": ["markdown", "html"]}
         assert manifest["total"] == 1
         assert manifest["finished"] == 1
 
@@ -219,8 +224,81 @@ class TestWriteManifest:
         assert page["files"]["html"] == f"{h}.html"
 
     @pytest.mark.anyio
+    async def test_manifest_markdown_only_omits_html_file(self, tmp_path: Path) -> None:
+        storage = _make_storage(tmp_path)
+        page_url = "https://example.com/page1"
+        await storage.write("job-md", page_url, ExtractedContent(markdown="# Page 1"))
+
+        await storage.write_manifest(
+            job_id="job-md",
+            url="https://example.com",
+            config_data={"formats": ["markdown"]},
+            total=1,
+            finished=1,
+            status="completed",
+            created_at="2026-03-16T10:00:00+00:00",
+            finished_at="2026-03-16T10:05:00+00:00",
+            records=[{"url": page_url, "status": "completed", "http_status": 200}],
+        )
+
+        manifest = json.loads((tmp_path / "job-md" / "manifest.json").read_text(encoding="utf-8"))
+        h = storage.url_hash(page_url)
+        assert manifest["pages"][h]["files"] == {"markdown": f"{h}.md"}
+
+    @pytest.mark.anyio
+    async def test_manifest_html_only_omits_markdown_file(self, tmp_path: Path) -> None:
+        storage = _make_storage(tmp_path)
+        page_url = "https://example.com/page1"
+        await storage.write("job-html", page_url, ExtractedContent(html="<h1>Page 1</h1>"))
+
+        await storage.write_manifest(
+            job_id="job-html",
+            url="https://example.com",
+            config_data={"formats": ["html"]},
+            total=1,
+            finished=1,
+            status="completed",
+            created_at="2026-03-16T10:00:00+00:00",
+            finished_at="2026-03-16T10:05:00+00:00",
+            records=[{"url": page_url, "status": "completed", "http_status": 200}],
+        )
+
+        manifest = json.loads((tmp_path / "job-html" / "manifest.json").read_text(encoding="utf-8"))
+        h = storage.url_hash(page_url)
+        assert manifest["pages"][h]["files"] == {"html": f"{h}.html"}
+
+    @pytest.mark.anyio
+    async def test_manifest_omits_missing_requested_format_file(self, tmp_path: Path) -> None:
+        storage = _make_storage(tmp_path)
+        page_url = "https://example.com/page1"
+        await storage.write("job-missing", page_url, ExtractedContent(markdown="# Page 1"))
+
+        await storage.write_manifest(
+            job_id="job-missing",
+            url="https://example.com",
+            config_data={"formats": ["markdown", "html"]},
+            total=1,
+            finished=1,
+            status="completed",
+            created_at="2026-03-16T10:00:00+00:00",
+            finished_at="2026-03-16T10:05:00+00:00",
+            records=[{"url": page_url, "status": "completed", "http_status": 200}],
+        )
+
+        manifest = json.loads(
+            (tmp_path / "job-missing" / "manifest.json").read_text(encoding="utf-8")
+        )
+        h = storage.url_hash(page_url)
+        assert manifest["pages"][h]["files"] == {"markdown": f"{h}.md"}
+
+    @pytest.mark.anyio
     async def test_manifest_only_includes_completed(self, tmp_path: Path) -> None:
         storage = _make_storage(tmp_path)
+        await storage.write(
+            "job2",
+            "https://example.com/ok",
+            ExtractedContent(markdown="# OK"),
+        )
         records = [
             {"url": "https://example.com/ok", "status": "completed", "http_status": 200},
             {"url": "https://example.com/err", "status": "errored", "http_status": 500},
@@ -231,7 +309,7 @@ class TestWriteManifest:
         await storage.write_manifest(
             job_id="job2",
             url="https://example.com",
-            config_data={},
+            config_data={"formats": ["markdown"]},
             total=4,
             finished=2,
             status="completed",
@@ -275,23 +353,25 @@ class TestWriteManifest:
 
 
 class TestPathTraversalGuard:
+    def test_valid_child_path_is_allowed(self, tmp_path: Path) -> None:
+        storage = _make_storage(tmp_path)
+
+        storage._ensure_within_output_dir(tmp_path / "job1" / "file.md")
+
     @pytest.mark.anyio
     async def test_write_with_traversal_raises(self, tmp_path: Path) -> None:
         """A URL that produces a path outside the output dir is rejected."""
         storage = _make_storage(tmp_path)
-        # Directly test the guard method
-        import pathlib
 
         outside = tmp_path.parent / "escaped"
         with pytest.raises(ValueError, match="Path traversal detected"):
-            storage._ensure_within_output_dir(pathlib.Path(outside))
+            storage._ensure_within_output_dir(outside)
 
     @pytest.mark.anyio
     async def test_read_with_traversal_raises(self, tmp_path: Path) -> None:
         """Reading a path that resolves outside the output dir is rejected."""
         storage = _make_storage(tmp_path)
-        import pathlib
 
         outside = tmp_path.parent / "escaped"
         with pytest.raises(ValueError, match="Path traversal detected"):
-            storage._ensure_within_output_dir(pathlib.Path(outside))
+            storage._ensure_within_output_dir(outside)

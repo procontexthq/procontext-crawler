@@ -7,9 +7,12 @@ from unittest.mock import AsyncMock
 
 import anyio
 import pytest
+from pydantic import ValidationError
 
+from proctx_crawler.config import Settings
 from proctx_crawler.core.fetcher import FetchResult
-from proctx_crawler.crawler import Crawler
+from proctx_crawler.crawler import Crawler, _build_goto_options
+from proctx_crawler.infrastructure.content_storage import ExtractedContent
 from proctx_crawler.models import (
     ErrorCode,
     FetchError,
@@ -204,6 +207,15 @@ class TestCrawl:
         assert len(completed) == 1
         assert completed[0].markdown is not None
         assert completed[0].html is None
+
+    @pytest.mark.anyio
+    async def test_unsupported_source_is_rejected(self, tmp_path: Path) -> None:
+        async with Crawler(output_dir=tmp_path / "out", db_path=tmp_path / "test.db") as crawler:
+            with pytest.raises(ValidationError):
+                await crawler.crawl(
+                    "https://example.com",
+                    source="sitemaps",  # type: ignore[arg-type]
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -470,22 +482,20 @@ class TestDefaults:
 
     def test_settings_injection(self, tmp_path: Path) -> None:
         """An injected Settings instance populates all fields."""
-        from proctx_crawler.config import Settings
-
         settings = Settings(
             output_dir=tmp_path / "from-settings",
             db_path=tmp_path / "from-settings.db",
             playwright_headless=False,
+            job_timeout=123,
         )
         crawler = Crawler(settings=settings)
         assert crawler._output_dir == tmp_path / "from-settings"
         assert crawler._db_path == tmp_path / "from-settings.db"
         assert crawler._playwright_headless is False
+        assert crawler._job_timeout == 123
 
     def test_explicit_kwargs_override_settings(self, tmp_path: Path) -> None:
         """Explicit kwargs win over an injected Settings instance."""
-        from proctx_crawler.config import Settings
-
         settings = Settings(
             output_dir=tmp_path / "ignored",
             db_path=tmp_path / "ignored.db",
@@ -505,8 +515,6 @@ class TestDefaults:
     async def test_settings_max_response_size_reaches_static_fetch(
         self, tmp_path: Path, mocker: MockerFixture
     ) -> None:
-        from proctx_crawler.config import Settings
-
         settings = Settings(
             output_dir=tmp_path / "out",
             db_path=tmp_path / "test.db",
@@ -528,6 +536,40 @@ class TestDefaults:
 
         mock_static.assert_awaited_once_with("https://example.com", max_response_size=2048)
 
+    @pytest.mark.anyio
+    async def test_settings_job_timeout_reaches_crawl_engine(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        settings = Settings(
+            output_dir=tmp_path / "out",
+            db_path=tmp_path / "test.db",
+            job_timeout=7,
+        )
+        mock_run_crawl = mocker.patch("proctx_crawler.crawler.run_crawl")
+
+        async def _fake_run_crawl(
+            job,
+            repo,
+            storage,
+            browser_pool=None,
+            max_response_size: int = 10_485_760,
+            job_timeout: int | None = None,
+        ) -> None:
+            assert job_timeout == 7
+            await repo.enqueue_url(job.id, job.url, depth=0)
+            await repo.mark_url_completed(job.id, job.url, http_status=200, title="Home")
+            await repo.update_job_status(job.id, JobStatus.COMPLETED)
+            await repo.update_job_counts(job.id, total=1, finished=1)
+            await storage.write(job.id, job.url, ExtractedContent(markdown="# Home"))
+
+        mock_run_crawl.side_effect = _fake_run_crawl
+
+        async with Crawler(settings=settings) as crawler:
+            result = await crawler.crawl("https://example.com", limit=1)
+
+        assert result.status == JobStatus.COMPLETED
+        mock_run_crawl.assert_awaited_once()
+
 
 # ---------------------------------------------------------------------------
 # _build_goto_options
@@ -536,13 +578,9 @@ class TestDefaults:
 
 class TestBuildGotoOptions:
     def test_none_returns_none(self) -> None:
-        from proctx_crawler.crawler import _build_goto_options
-
         assert _build_goto_options(None) is None
 
     def test_dict_returns_goto_options(self) -> None:
-        from proctx_crawler.crawler import _build_goto_options
-
         result = _build_goto_options({"wait_until": "domcontentloaded", "timeout": 5000})
         assert result is not None
         assert result.wait_until == "domcontentloaded"
@@ -576,18 +614,19 @@ class TestCrawlWithRender:
         mocker.patch("proctx_crawler.crawler.BrowserPool", return_value=mock_pool_instance)
         mock_run_crawl = mocker.patch("proctx_crawler.crawler.run_crawl")
 
-        async def _fake_run_crawl(  # type: ignore[no-untyped-def]
-            job, repo, storage, browser_pool=None, max_response_size=10_485_760
-        ):
+        async def _fake_run_crawl(
+            job,
+            repo,
+            storage,
+            browser_pool=None,
+            max_response_size: int = 10_485_760,
+            job_timeout: int | None = None,
+        ) -> None:
             await repo.enqueue_url(job.id, job.url, depth=0)
             await repo.mark_url_completed(job.id, job.url, http_status=200, title="Home")
             await repo.update_job_status(job.id, JobStatus.COMPLETED)
             await repo.update_job_counts(job.id, total=1, finished=1)
-            await storage.write(
-                job.id,
-                job.url,
-                type("Content", (), {"markdown": "# Home", "html": None})(),
-            )
+            await storage.write(job.id, job.url, ExtractedContent(markdown="# Home"))
 
         mock_run_crawl.side_effect = _fake_run_crawl
 
@@ -601,6 +640,7 @@ class TestCrawlWithRender:
         assert call_kwargs[1].get("browser_pool") is mock_pool_instance or (
             len(call_kwargs[0]) >= 4 and call_kwargs[0][3] is mock_pool_instance
         )
+        assert call_kwargs[1].get("job_timeout") == 3600
 
 
 class TestReExport:

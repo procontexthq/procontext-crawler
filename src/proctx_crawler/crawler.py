@@ -68,6 +68,7 @@ class Crawler:
             playwright_headless if playwright_headless is not None else resolved.playwright_headless
         )
         self._max_response_size = resolved.max_response_size
+        self._job_timeout = resolved.job_timeout
         self._repo: SQLiteRepository | None = None
         self._storage: ContentStorage | None = None
         self._browser_pool: BrowserPool | None = None
@@ -102,7 +103,7 @@ class Crawler:
         *,
         limit: int = 10,
         depth: int = 1000,
-        source: Literal["links", "llms_txt", "sitemaps", "all"] = "links",
+        source: Literal["links", "llms_txt"] = "links",
         formats: list[Literal["markdown", "html"]] | None = None,
         render: bool = False,
         goto_options: dict[str, Any] | None = None,
@@ -130,7 +131,14 @@ class Crawler:
         job = await build_and_persist_job(url, config, repo)
 
         pool = await self._ensure_browser_pool() if render else None
-        await run_crawl(job, repo, storage, pool, max_response_size=self._max_response_size)
+        await run_crawl(
+            job,
+            repo,
+            storage,
+            pool,
+            max_response_size=self._max_response_size,
+            job_timeout=self._job_timeout,
+        )
 
         return await collect_crawl_result(job.id, repo, storage, resolved_formats)
 

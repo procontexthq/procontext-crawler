@@ -10,6 +10,8 @@ from proctx_crawler.core.url_utils import (
     is_subdomain,
     matches_patterns,
     normalise_url,
+    redact_url,
+    redact_url_references,
     url_hash,
 )
 
@@ -75,6 +77,11 @@ class TestNormaliseUrl:
         # %20 is space — should stay encoded
         result = normalise_url("https://example.com/hello%20world")
         assert "%20" in result
+
+    def test_percent_encoding_reserved_delimiters_preserved(self) -> None:
+        assert normalise_url("https://example.com/a%2fb") == "https://example.com/a%2Fb"
+        assert normalise_url("https://example.com/a%3fb") == "https://example.com/a%3Fb"
+        assert normalise_url("https://example.com/a%23b") == "https://example.com/a%23b"
 
     def test_percent_encoding_dedup(self) -> None:
         # These should normalise to the same URL
@@ -267,3 +274,20 @@ class TestUrlHash:
         h1 = url_hash("https://example.com/a")
         h2 = url_hash("https://example.com/b")
         assert h1 != h2
+
+
+class TestRedactUrl:
+    def test_removes_query_fragment_and_userinfo(self) -> None:
+        result = redact_url("https://user:secret@example.com/path?token=abc#frag")
+        assert result == "https://example.com/path"
+
+    def test_preserves_host_port_and_path(self) -> None:
+        result = redact_url("https://example.com:8443/docs/page?api_key=secret")
+        assert result == "https://example.com:8443/docs/page"
+
+    def test_redacts_urls_embedded_in_error_text(self) -> None:
+        result = redact_url_references(
+            "Failed https://user:secret@example.com/a?token=abc#frag; retry later"
+        )
+
+        assert result == "Failed https://example.com/a; retry later"

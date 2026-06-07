@@ -4,23 +4,45 @@ from __future__ import annotations
 
 import hashlib
 import re
-from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlsplit, urlunparse, urlunsplit
 
 # RFC 3986 Section 2.3: unreserved characters that should be decoded
 _UNRESERVED = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+_URL_IN_TEXT_RE = re.compile(r"https?://[^\s<>'\"]+")
 
 
 def _normalise_percent_encoding(s: str) -> str:
-    """Decode unreserved percent-encoded chars, re-encode with uppercase hex."""
-    decoded = unquote(s)
-    # Re-encode: only encode characters that are NOT unreserved and NOT structural
-    # We decode fully then re-encode non-unreserved chars, preserving path structure
+    """Decode only unreserved percent-encoded chars and uppercase remaining escapes."""
     result: list[str] = []
-    for char in decoded:
-        if char in _UNRESERVED or char in "/:@!$&'()+,;=":
+    i = 0
+    while i < len(s):
+        char = s[i]
+        if char == "%" and i + 2 < len(s):
+            hex_part = s[i + 1 : i + 3]
+            try:
+                raw_byte = bytes.fromhex(hex_part)
+            except ValueError:
+                result.append("%")
+                i += 1
+                continue
+            try:
+                decoded = raw_byte.decode("utf-8")
+            except UnicodeDecodeError:
+                result.append(f"%{hex_part.upper()}")
+                i += 3
+                continue
+
+            if len(decoded) == 1 and decoded in _UNRESERVED:
+                result.append(decoded)
+            else:
+                result.append(f"%{hex_part.upper()}")
+            i += 3
+            continue
+        elif char in _UNRESERVED or char in "/:@!$&'()+,;=":
             result.append(char)
         else:
             result.append(quote(char, safe=""))
+        i += 1
     return "".join(result)
 
 
@@ -129,3 +151,28 @@ def is_subdomain(url: str, base_url: str) -> bool:
 def url_hash(url: str) -> str:
     """Return a truncated SHA-256 hash (16 hex chars) of the URL."""
     return hashlib.sha256(url.encode()).hexdigest()[:16]
+
+
+def redact_url(url: str) -> str:
+    """Strip userinfo, query, and fragment from a URL before logging or error reporting."""
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return "<invalid-url>"
+
+    netloc = parsed.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parsed.scheme, netloc, parsed.path, "", ""))
+
+
+def redact_url_references(text: str) -> str:
+    """Redact URL substrings embedded in an arbitrary error message."""
+
+    def _replace(match: re.Match[str]) -> str:
+        raw_url = match.group(0)
+        suffix = ""
+        while raw_url and raw_url[-1] in ".,;:!?)":
+            suffix = raw_url[-1] + suffix
+            raw_url = raw_url[:-1]
+        return f"{redact_url(raw_url)}{suffix}"
+
+    return _URL_IN_TEXT_RE.sub(_replace, text)

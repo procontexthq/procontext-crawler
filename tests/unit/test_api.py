@@ -126,7 +126,7 @@ def app(
     test_app.state.storage = mock_storage
     test_app.state.browser_pool = mock_browser_pool
     test_app.state.task_group = mock_task_group
-    test_app.state.settings = MagicMock(max_response_size=2048, auth_api_key=None)
+    test_app.state.settings = MagicMock(max_response_size=2048, job_timeout=99, auth_api_key=None)
     return test_app
 
 
@@ -158,12 +158,28 @@ class TestPostCrawl:
         mock_task_group.start_soon.assert_called_once()
         start_args = mock_task_group.start_soon.call_args.args
         assert start_args[0].__name__ == "run_crawl"
-        assert start_args[-1] == 2048
+        assert start_args[-2] == 2048
+        assert start_args[-1] == 99
 
     @pytest.mark.anyio
     async def test_invalid_input_returns_400(self, client: httpx.AsyncClient) -> None:
         # Missing 'url' field
         resp = await client.post("/crawl", json={})
+        assert resp.status_code == 400
+        data = resp.json()
+        assert data["success"] is False
+        assert data["error"]["code"] == "INVALID_INPUT"
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("source", ["sitemaps", "all"])
+    async def test_v02_sources_return_invalid_input(
+        self, client: httpx.AsyncClient, source: str
+    ) -> None:
+        resp = await client.post(
+            "/crawl",
+            json={"url": "https://example.com", "source": source},
+        )
+
         assert resp.status_code == 400
         data = resp.json()
         assert data["success"] is False
@@ -524,7 +540,11 @@ class TestAuthMiddleware:
         inner.state.storage = mock_storage
         inner.state.browser_pool = mock_browser_pool
         inner.state.task_group = mock_task_group
-        inner.state.settings = MagicMock(max_response_size=2048, auth_api_key="test-secret-key")
+        inner.state.settings = MagicMock(
+            max_response_size=2048,
+            job_timeout=99,
+            auth_api_key="test-secret-key",
+        )
         return AuthMiddleware(inner, api_key="test-secret-key")
 
     @pytest.fixture

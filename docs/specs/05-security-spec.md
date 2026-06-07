@@ -114,7 +114,7 @@ This document identifies threats arising from these characteristics and defines 
 | Control | Phase | Description |
 |---------|-------|-------------|
 | **URL scheme validation** | v0.1 | Only `http://` and `https://` schemes are allowed. Reject `file://`, `ftp://`, `gopher://`, `data:`, etc. |
-| **Private IP blocking** | v0.1 | Before connecting, resolve the hostname and reject private/reserved IP ranges: `127.0.0.0/8`, `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `169.254.0.0/16`, `::1`, `fc00::/7`, `fe80::/10`, `100.64.0.0/10` (CGNAT). |
+| **Private/reserved IP blocking** | v0.1 | Before connecting, resolve the hostname and reject unspecified, loopback, private, link-local, multicast, reserved, carrier-grade NAT (`100.64.0.0/10`), benchmarking (`198.18.0.0/15`), and IPv4-mapped blocked addresses. NAT64 well-known-prefix addresses are allowed only when their embedded IPv4 address is public. |
 | **Post-redirect validation** | v0.1 | For httpx, use manual redirect handling (`follow_redirects=False`). After each redirect, re-validate the target URL against the SSRF blocklist before following. |
 | **DNS resolution check** | v0.1 | Resolve the hostname to an IP address and check the IP against the blocklist before establishing a connection. This prevents DNS records that resolve to private IPs. |
 | **Playwright network interception** | v0.2 | Intercept Playwright's network requests to apply the same SSRF checks. In v0.1, Playwright bypasses the httpx SSRF checks — the browser makes its own connections. |
@@ -132,9 +132,9 @@ This document identifies threats arising from these characteristics and defines 
 | Control | Phase | Description |
 |---------|-------|-------------|
 | **Page limit** | v0.1 | `limit` parameter caps pages per job (default: 10). |
-| **Job timeout** | v0.1 | Default 1-hour timeout per job. Configurable. |
+| **Job timeout watchdog** | v0.1 | Default 1-hour cooperative watchdog. The engine checks the deadline between URLs, cancels queued URLs on timeout, and does not abort in-flight fetches. |
 | **Response size limit** | v0.1 | Reject HTTP responses larger than 10 MB (configurable). Prevents memory exhaustion from pathologically large pages. |
-| **Concurrent job limit** | v0.1 | Maximum number of concurrent crawl jobs (default: 10, configurable). New jobs beyond the limit are queued or rejected. |
+| **Concurrent job limit setting** | v0.1 | Default 10-job setting exists, but the v0.1 runtime does not enforce scheduling limits yet. |
 | **Disk quota** | v0.2 | Configurable maximum disk usage per job and globally. Jobs exceeding the quota are cancelled. |
 | **Per-domain rate limiting** | v0.2 | Configurable delay between requests to the same domain. Prevents overwhelming target sites. |
 
@@ -183,7 +183,7 @@ This document identifies threats arising from these characteristics and defines 
 
 | Control | Phase | Description |
 |---------|-------|-------------|
-| **No credential logging** | v0.1 | structlog processors strip `Authorization` headers, `api_key`, and `password` fields from log output. |
+| **No credential logging** | v0.1 | Runtime code must not log credentials. Dedicated log redaction is deferred unless it can be implemented with simple built-in structlog configuration; no custom redaction processor is currently part of v0.1. |
 | **Credentials not stored in DB** | v0.2 | Target site credentials (`authenticate`, `cookies`, `set_extra_http_headers`) are used for the current request only. They are NOT persisted in the job configuration stored in SQLite. |
 | **API key comparison** | v0.1 | Use constant-time comparison for API key validation to prevent timing attacks. |
 | **Error message sanitisation** | v0.1 | Error responses never include credentials. URL parameters that might contain tokens are stripped from error messages. |
@@ -257,18 +257,18 @@ This document identifies threats arising from these characteristics and defines 
 | ID | Control | Component |
 |----|---------|-----------|
 | S1 | URL scheme validation (HTTP/HTTPS only) | Fetcher |
-| S2 | Private IP blocking (pre-connect DNS check) | Fetcher |
+| S2 | Private/reserved IP blocking (pre-connect DNS check) | Fetcher |
 | S3 | Post-redirect SSRF validation (static fetcher) | Fetcher |
 | S4 | Response size limit (10 MB default) | Fetcher |
 | S5 | Page limit per job (default: 10) | Crawl Engine |
-| S6 | Job timeout (default: 1 hour) | Job Scheduler |
-| S7 | Concurrent job limit (default: 10) | Job Scheduler |
+| S6 | Cooperative job timeout watchdog | Crawl Engine |
+| S7 | Concurrent job limit setting present; enforcement deferred | Job Scheduler |
 | S8 | Playwright headless mode | Renderer |
 | S9 | Fresh browser context per fetch | Renderer |
 | S10 | Navigation timeout (30s) | Renderer |
 | S11 | Optional API key authentication | API Layer |
 | S12 | Constant-time API key comparison | API Layer |
-| S13 | No credential logging | Logging |
+| S13 | Fetch/render error URL redaction; static redirect log URL redaction | Logging |
 | S14 | SHA-256 filename hashing | Content Storage |
 | S15 | Dependency lock file | Build |
 | S16 | pip-audit in CI | Build |
@@ -335,7 +335,7 @@ This document identifies threats arising from these characteristics and defines 
 | Target site credentials (v0.2) | In-memory only | Single request |
 | AI model API keys (v0.3) | In-memory only | Single request |
 
-Target site credentials and AI model keys are **never** written to the database or logs.
+Target site credentials and AI model keys are **never** written to the database or logs. Fetch/render error messages and static redirect logs strip URL userinfo, query strings, and fragments before surfacing target URLs.
 
 ---
 

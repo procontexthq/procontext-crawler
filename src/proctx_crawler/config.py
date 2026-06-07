@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     # Crawl defaults
     default_limit: int = 10
     default_depth: int = 1000
-    job_timeout: int = 3600
+    job_timeout: int = Field(default=3600, ge=1)
     max_concurrent_jobs: int = 10
     max_response_size: int = 10485760  # 10 MB
     metadata_retention_days: int = 7

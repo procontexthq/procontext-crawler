@@ -77,6 +77,7 @@ async def start_crawl(config: CrawlConfig, request: Request) -> SuccessResponse[
     storage = _storage(request)
     pool = _browser_pool(request) if config.render else None
     max_response_size = request.app.state.settings.max_response_size
+    job_timeout = request.app.state.settings.job_timeout
 
     job = await build_and_persist_job(config.url, config, repo)
     request.app.state.task_group.start_soon(
@@ -86,6 +87,7 @@ async def start_crawl(config: CrawlConfig, request: Request) -> SuccessResponse[
         storage,
         pool,
         max_response_size,
+        job_timeout,
     )
 
     log.info("crawl_job_created", job_id=job.id, url=config.url)

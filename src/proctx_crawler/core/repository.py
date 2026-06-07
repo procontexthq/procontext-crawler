@@ -37,6 +37,10 @@ class Repository(Protocol):
         """Return ``True`` if the job has been cancelled."""
         ...
 
+    async def list_jobs(self, *, limit: int = 100, offset: int = 0) -> list[Job]:
+        """Return persisted jobs, newest first."""
+        ...
+
     # -- URL record operations ------------------------------------------------
 
     async def enqueue_url(self, job_id: str, url: str, depth: int) -> None:

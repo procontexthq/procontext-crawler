@@ -133,7 +133,7 @@ Content-Type: application/json
 | `url` | string | Yes | — | Starting URL |
 | `limit` | integer | No | 10 | Max pages to crawl (min: 1) |
 | `depth` | integer | No | 1000 | Max link hops from starting URL (min: 0) |
-| `source` | string | No | `"links"` | URL discovery: `"links"`, `"llms_txt"`, `"sitemaps"` [v0.2], `"all"` [v0.2] |
+| `source` | string | No | `"links"` | URL discovery: `"links"` or `"llms_txt"`. `"sitemaps"` and `"all"` are v0.2 roadmap values and return `INVALID_INPUT` in v0.1. |
 | `formats` | string[] | No | `["markdown"]` | Output formats: `"markdown"`, `"html"` |
 | `render` | boolean | No | `false` | Use Playwright rendering |
 | `goto_options.wait_until` | string | No | `"load"` | Page load strategy (render only) |
@@ -144,6 +144,8 @@ Content-Type: application/json
 | `options.exclude_patterns` | string[] | No | — | Wildcard URL exclude patterns |
 | `options.include_subdomains` | boolean | No | `false` | Follow subdomain links |
 | `options.include_external_links` | boolean | No | `false` | Follow cross-domain links |
+
+The server-level `Settings.job_timeout` applies to every crawl job. Timeout enforcement is cooperative: the engine checks before and after each URL, does not abort an in-flight fetch/render, and finalises a timed-out job as `cancelled` after cancelling queued URLs and writing `manifest.json`.
 
 ### Response
 
@@ -898,7 +900,7 @@ async def crawl(
     *,
     limit: int = 10,
     depth: int = 1000,
-    source: Literal["links", "llms_txt", "sitemaps", "all"] = "links",
+    source: Literal["links", "llms_txt"] = "links",
     formats: list[Literal["markdown", "html"]] | None = None,
     render: bool = False,
     goto_options: dict | None = None,
@@ -908,7 +910,7 @@ async def crawl(
 ) -> CrawlResult:
 ```
 
-**Behaviour**: Blocks until the crawl is complete. For non-blocking crawls, wrap in `anyio.create_task_group()`.
+**Behaviour**: Blocks until the crawl is complete. The instance's `Settings.job_timeout` is passed to the crawl engine and uses the same cooperative timeout semantics as the HTTP API. For non-blocking crawls, wrap in `anyio.create_task_group()`.
 
 **Raises**: `CrawlerError` subclasses for job-level failures.
 

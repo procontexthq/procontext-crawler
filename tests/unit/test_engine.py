@@ -24,7 +24,7 @@ from proctx_crawler.models import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
     from pytest_mock import MockerFixture
@@ -137,6 +137,17 @@ def _patch_fetcher(mocker: MockerFixture, pages: dict[str, tuple[int, str]]) -> 
         return FetchResult(url=url, status_code=status_code, html=html, headers={})
 
     mocker.patch("proctx_crawler.core.engine.fetch_static", side_effect=_mock_fetch)
+
+
+def _monotonic_values(values: list[float]) -> Callable[[], float]:
+    remaining = values.copy()
+
+    def _next() -> float:
+        if len(remaining) > 1:
+            return remaining.pop(0)
+        return remaining[0]
+
+    return _next
 
 
 # ---------------------------------------------------------------------------
@@ -282,6 +293,125 @@ class TestPageLimit:
         records, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.COMPLETED)
         assert len(records) == 3
 
+    @pytest.mark.anyio
+    async def test_page_limit_does_not_leave_queued_records(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        pages = {
+            "https://example.com": (
+                200,
+                _html(
+                    "Home",
+                    links=[
+                        "https://example.com/p1",
+                        "https://example.com/p2",
+                        "https://example.com/p3",
+                    ],
+                ),
+            ),
+            "https://example.com/p1": (200, _html("P1")),
+            "https://example.com/p2": (200, _html("P2")),
+            "https://example.com/p3": (200, _html("P3")),
+        }
+        _patch_fetcher(mocker, pages)
+
+        job = _make_job(limit=2, depth=1)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage)
+
+        all_records, _ = await repo.get_url_records(job.id, limit=100)
+        queued, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.QUEUED)
+        assert len(all_records) == 2
+        assert queued == []
+
+        final_job = await repo.get_job(job.id)
+        assert final_job is not None
+        assert final_job.total == 2
+        assert final_job.finished == 2
+
+    @pytest.mark.anyio
+    async def test_errored_urls_count_toward_page_limit(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        pages = {
+            "https://example.com": (
+                200,
+                _html(
+                    "Home",
+                    links=[
+                        "https://example.com/missing",
+                        "https://example.com/should-not-schedule",
+                    ],
+                ),
+            ),
+        }
+        _patch_fetcher(mocker, pages)
+
+        job = _make_job(limit=2, depth=1)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage)
+
+        all_records, _ = await repo.get_url_records(job.id, limit=100)
+        errored, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.ERRORED)
+
+        assert [record.url for record in all_records] == [
+            "https://example.com",
+            "https://example.com/missing",
+        ]
+        assert len(errored) == 1
+
+        final_job = await repo.get_job(job.id)
+        assert final_job is not None
+        assert final_job.total == 2
+        assert final_job.finished == 2
+
+    @pytest.mark.anyio
+    async def test_all_errored_url_attempts_respect_limit(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        pages = {
+            "https://example.com/llms.txt": (
+                200,
+                "\n".join(
+                    [
+                        "- [A](https://example.com/a)",
+                        "- [B](https://example.com/b)",
+                        "- [C](https://example.com/c)",
+                    ]
+                ),
+            ),
+        }
+        _patch_fetcher(mocker, pages)
+
+        job = _make_job(url="https://example.com/llms.txt", source="llms_txt", limit=2)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage)
+
+        all_records, _ = await repo.get_url_records(job.id, limit=100)
+        errored, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.ERRORED)
+        assert len(all_records) == 2
+        assert len(errored) == 2
+
+        final_job = await repo.get_job(job.id)
+        assert final_job is not None
+        assert final_job.total == 2
+        assert final_job.finished == 2
+
 
 class TestUrlPatternFiltering:
     """Include pattern **/docs/** — URLs not matching are skipped."""
@@ -421,6 +551,95 @@ class TestCancellation:
         assert len(records) == 1
 
 
+class TestJobTimeout:
+    """Cooperative job timeout cancels queued URLs and finalises the job."""
+
+    @pytest.mark.anyio
+    async def test_timeout_before_first_url_cancels_queued_url(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        pages = {"https://example.com": (200, _html("Home"))}
+        _patch_fetcher(mocker, pages)
+        fetch_static = mocker.patch("proctx_crawler.core.engine.fetch_static")
+        mocker.patch(
+            "proctx_crawler.core.engine.monotonic",
+            side_effect=_monotonic_values([0.0, 2.0]),
+        )
+
+        job = _make_job(limit=1, depth=0)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage, job_timeout=1)
+
+        fetch_static.assert_not_awaited()
+        final_job = await repo.get_job(job.id)
+        assert final_job is not None
+        assert final_job.status == JobStatus.CANCELLED
+        assert final_job.total == 1
+        assert final_job.finished == 1
+
+        records, _ = await repo.get_url_records(job.id, limit=100)
+        assert len(records) == 1
+        assert records[0].status == UrlStatus.CANCELLED
+
+        manifest = json.loads((storage.job_dir(job.id) / "manifest.json").read_text())
+        assert manifest["status"] == "cancelled"
+        assert manifest["total"] == 1
+        assert manifest["finished"] == 1
+        assert manifest["pages"] == {}
+
+    @pytest.mark.anyio
+    async def test_timeout_after_url_cancels_discovered_queue(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        pages = {
+            "https://example.com": (
+                200,
+                _html("Home", links=["https://example.com/a", "https://example.com/b"]),
+            ),
+            "https://example.com/a": (200, _html("A")),
+            "https://example.com/b": (200, _html("B")),
+        }
+        _patch_fetcher(mocker, pages)
+        mocker.patch(
+            "proctx_crawler.core.engine.monotonic",
+            side_effect=_monotonic_values([0.0, 0.0, 2.0]),
+        )
+
+        job = _make_job(limit=10, depth=1)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage, job_timeout=1)
+
+        final_job = await repo.get_job(job.id)
+        assert final_job is not None
+        assert final_job.status == JobStatus.CANCELLED
+        assert final_job.total == 3
+        assert final_job.finished == 3
+
+        completed, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.COMPLETED)
+        cancelled, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.CANCELLED)
+        assert [record.url for record in completed] == ["https://example.com"]
+        assert {record.url for record in cancelled} == {
+            "https://example.com/a",
+            "https://example.com/b",
+        }
+
+        manifest = json.loads((storage.job_dir(job.id) / "manifest.json").read_text())
+        assert manifest["status"] == "cancelled"
+        assert manifest["total"] == 3
+        assert manifest["finished"] == 3
+        assert len(manifest["pages"]) == 1
+
+
 class TestErrorIsolation:
     """One URL returns an error. Other URLs still crawled. Failed URL marked as errored."""
 
@@ -511,6 +730,39 @@ class TestLlmsTxtSource:
         assert "https://example.com/b" in crawled_urls
         # Per-page link discovery should NOT happen for llms_txt.
         assert "https://example.com/should-not-follow" not in crawled_urls
+
+    @pytest.mark.anyio
+    async def test_llms_txt_seeding_respects_page_limit(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        llms_txt_content = (
+            "# llms.txt\n"
+            "- [Page A](https://example.com/a)\n"
+            "- [Page B](https://example.com/b)\n"
+            "- [Page C](https://example.com/c)\n"
+        )
+        pages = {
+            "https://example.com/llms.txt": (200, llms_txt_content),
+            "https://example.com/a": (200, _html("Page A")),
+            "https://example.com/b": (200, _html("Page B")),
+            "https://example.com/c": (200, _html("Page C")),
+        }
+        _patch_fetcher(mocker, pages)
+
+        job = _make_job(url="https://example.com/llms.txt", source="llms_txt", limit=2)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage)
+
+        records, _ = await repo.get_url_records(job.id, limit=100)
+        assert [record.url for record in records] == [
+            "https://example.com/a",
+            "https://example.com/b",
+        ]
 
 
 class TestVisitedSetDeduplication:
@@ -763,3 +1015,27 @@ class TestRenderPathInEngine:
         final_job = await repo.get_job(job.id)
         assert final_job is not None
         assert final_job.status == JobStatus.COMPLETED
+
+    @pytest.mark.anyio
+    async def test_render_without_browser_pool_marks_url_errored_and_skips_static(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        mock_static = mocker.patch("proctx_crawler.core.engine.fetch_static")
+        mock_render = mocker.patch("proctx_crawler.core.engine.fetch_rendered")
+
+        job = _make_job(limit=1, depth=0)
+        job.config.render = True
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage, browser_pool=None)
+
+        mock_static.assert_not_awaited()
+        mock_render.assert_not_awaited()
+
+        errored, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.ERRORED)
+        assert len(errored) == 1
+        assert "browser_pool is required" in (errored[0].error_message or "")

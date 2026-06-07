@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import structlog
 
 from proctx_crawler.core.fetcher import FetchResult
+from proctx_crawler.core.url_utils import redact_url, redact_url_references
 from proctx_crawler.models import ErrorCode, GotoOptions, RenderError
 
 if TYPE_CHECKING:
@@ -113,7 +114,10 @@ async def fetch_rendered(
     except Exception as exc:
         raise RenderError(
             code=ErrorCode.RENDER_FAILED,
-            message=f"Playwright rendering failed for {url}: {exc}",
+            message=(
+                f"Playwright rendering failed for {redact_url(url)}: "
+                f"{redact_url_references(str(exc))}"
+            ),
             recoverable=True,
         ) from exc
 
@@ -155,7 +159,10 @@ async def extract_visible_links_rendered(
     except Exception as exc:
         raise RenderError(
             code=ErrorCode.RENDER_FAILED,
-            message=f"Playwright rendering failed for {url}: {exc}",
+            message=(
+                f"Playwright rendering failed for {redact_url(url)}: "
+                f"{redact_url_references(str(exc))}"
+            ),
             recoverable=True,
         ) from exc
 

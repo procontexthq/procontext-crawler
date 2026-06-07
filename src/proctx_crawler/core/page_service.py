@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 from proctx_crawler.core.fetcher import fetch_static
 from proctx_crawler.core.renderer import fetch_rendered
+from proctx_crawler.models import ErrorCode, RenderError
 
 if TYPE_CHECKING:
     from proctx_crawler.core.browser_pool import BrowserPool
@@ -36,8 +37,11 @@ async def fetch_page_html(
     """
     if render:
         if browser_pool is None:
-            msg = "browser_pool is required when render=True"
-            raise RuntimeError(msg)
+            raise RenderError(
+                code=ErrorCode.RENDER_FAILED,
+                message="browser_pool is required when render=True",
+                recoverable=False,
+            )
         return await fetch_rendered(
             url,
             browser_pool,

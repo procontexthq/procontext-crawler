@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections import deque
 from dataclasses import dataclass
+from time import monotonic
 from typing import TYPE_CHECKING
 
 import structlog
@@ -16,7 +17,7 @@ from proctx_crawler.core.renderer import fetch_rendered
 from proctx_crawler.core.url_utils import normalise_url
 from proctx_crawler.extractors import extract_html, html_to_markdown
 from proctx_crawler.infrastructure.content_storage import ExtractedContent
-from proctx_crawler.models import CrawlerError, JobStatus, UrlStatus
+from proctx_crawler.models import CrawlerError, ErrorCode, JobStatus, RenderError, UrlStatus
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -66,6 +67,8 @@ async def _seed_queue(
         seed_urls = await discover_seed_urls(job.url, job.config.source)
 
     for url in seed_urls:
+        if len(visited) >= job.config.limit:
+            break
         normalised = normalise_url(url)
         if normalised not in visited:
             queue.append(QueueEntry(url=url, depth=0))
@@ -81,7 +84,13 @@ async def _fetch_page(
     max_response_size: int,
 ) -> tuple[str, int]:
     """Fetch a page via static or rendered path. Returns ``(html, status_code)``."""
-    if job.config.render and browser_pool is not None:
+    if job.config.render:
+        if browser_pool is None:
+            raise RenderError(
+                code=ErrorCode.RENDER_FAILED,
+                message="browser_pool is required when render=True",
+                recoverable=False,
+            )
         result = await fetch_rendered(
             url,
             browser_pool,
@@ -110,12 +119,18 @@ def _content_hash(content: ExtractedContent) -> str:
     return hashlib.sha256(text.encode()).hexdigest()
 
 
+def _deadline_expired(deadline: float | None) -> bool:
+    """Return True when a cooperative crawl timeout deadline has passed."""
+    return deadline is not None and monotonic() >= deadline
+
+
 async def run_crawl(
     job: Job,
     repo: Repository,
     storage: ContentStorage,
     browser_pool: BrowserPool | None = None,
     max_response_size: int = 10_485_760,
+    job_timeout: int | None = None,
 ) -> None:
     """Execute a BFS crawl for the given job.
 
@@ -134,6 +149,8 @@ async def run_crawl(
 
     queue: deque[QueueEntry] = deque()
     visited: set[str] = set()
+    deadline = monotonic() + job_timeout if job_timeout is not None else None
+    timed_out = False
 
     # -- Phase 1: Seed the queue -----------------------------------------------
     try:
@@ -154,7 +171,12 @@ async def run_crawl(
 
     # -- Phase 2: BFS loop -----------------------------------------------------
     completed_count = 0
-    while queue and completed_count < job.config.limit:
+    while queue:
+        if _deadline_expired(deadline):
+            timed_out = True
+            log.warning("crawl_timed_out", timeout_seconds=job_timeout)
+            break
+
         if await repo.is_job_cancelled(job.id):
             log.info("crawl_cancelled")
             break
@@ -197,6 +219,8 @@ async def run_crawl(
                     start_url=job.url,
                 )
                 for new_url in new_urls:
+                    if len(visited) >= job.config.limit:
+                        break
                     normalised = normalise_url(new_url)
                     new_depth = entry.depth + 1
                     if normalised not in visited and new_depth <= job.config.depth:
@@ -215,10 +239,20 @@ async def run_crawl(
         total, finished = await repo.get_job_counts(job.id)
         await repo.update_job_counts(job.id, total=total, finished=finished)
 
+        if _deadline_expired(deadline):
+            timed_out = True
+            log.warning("crawl_timed_out", timeout_seconds=job_timeout)
+            break
+
     # -- Phase 3: Finalise -----------------------------------------------------
-    final_status = (
-        JobStatus.CANCELLED if await repo.is_job_cancelled(job.id) else JobStatus.COMPLETED
-    )
+    is_cancelled = timed_out or await repo.is_job_cancelled(job.id)
+    if is_cancelled:
+        await repo.cancel_queued_urls(job.id)
+
+    total, finished = await repo.get_job_counts(job.id)
+    await repo.update_job_counts(job.id, total=total, finished=finished)
+
+    final_status = JobStatus.CANCELLED if is_cancelled else JobStatus.COMPLETED
     await repo.update_job_status(job.id, final_status)
 
     job_data = await repo.get_job(job.id)

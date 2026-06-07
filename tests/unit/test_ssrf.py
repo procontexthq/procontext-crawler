@@ -73,6 +73,13 @@ class TestIsPrivateIp:
         assert is_private_ip("100.64.0.1") is True
         assert is_private_ip("100.127.255.255") is True
 
+    def test_unspecified_multicast_reserved_and_benchmark_ipv4(self) -> None:
+        assert is_private_ip("0.0.0.0") is True
+        assert is_private_ip("224.0.0.1") is True
+        assert is_private_ip("240.0.0.1") is True
+        assert is_private_ip("198.18.0.1") is True
+        assert is_private_ip("192.0.2.1") is True
+
     # IPv6 private ranges
     def test_ipv6_loopback(self) -> None:
         assert is_private_ip("::1") is True
@@ -84,15 +91,30 @@ class TestIsPrivateIp:
     def test_ipv6_link_local(self) -> None:
         assert is_private_ip("fe80::1") is True
 
+    def test_unspecified_multicast_and_reserved_ipv6(self) -> None:
+        assert is_private_ip("::") is True
+        assert is_private_ip("ff02::1") is True
+        assert is_private_ip("2001:db8::1") is True
+
     # IPv4-mapped IPv6
     def test_ipv4_mapped_ipv6_private(self) -> None:
         assert is_private_ip("::ffff:127.0.0.1") is True
         assert is_private_ip("::ffff:10.0.0.1") is True
         assert is_private_ip("::ffff:192.168.1.1") is True
 
+    def test_ipv4_mapped_ipv6_reserved(self) -> None:
+        assert is_private_ip("::ffff:0.0.0.0") is True
+        assert is_private_ip("::ffff:198.18.0.1") is True
+
     def test_ipv4_mapped_ipv6_public(self) -> None:
         assert is_private_ip("::ffff:8.8.8.8") is False
         assert is_private_ip("::ffff:1.1.1.1") is False
+
+    def test_nat64_public_embedded_ipv4_allowed(self) -> None:
+        assert is_private_ip("64:ff9b::0808:0808") is False
+
+    def test_nat64_private_embedded_ipv4_blocked(self) -> None:
+        assert is_private_ip("64:ff9b::0a00:0001") is True
 
     # Public IPs
     def test_public_ipv4(self) -> None:

@@ -16,11 +16,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `llms.txt` discovery mode — seed a crawl from an `llms.txt` index instead of following on-page links.
 - Dual fetch paths: static `httpx` fetcher (default, fast) and Playwright Chromium renderer (opt-in via `render: true`) backed by a shared browser pool with crash recovery.
 - File-based content storage with per-job `manifest.json` and SHA-256 filenames; SQLite repository (WAL mode) for job and URL metadata.
-- Job lifecycle management — `queued → running → completed | cancelled | errored` with cancellation honoured mid-crawl and job-timeout enforcement.
+- Job lifecycle management — `queued → running → completed | cancelled | errored` with cancellation honoured mid-crawl.
+- Cooperative job timeout enforcement via `job_timeout`; timed-out jobs cancel queued URLs, update counts, and still write `manifest.json`.
 - Configuration via `proctx-crawler.yaml`, `PROCTX_CRAWLER__*` environment variables, or constructor arguments, with platform-aware default paths.
 - Optional `Authorization: Bearer` API-key authentication for the HTTP API, enabled by setting `auth_api_key`.
 
 ### Security
 
-- SSRF protection on the static fetch path: blocks private, loopback, link-local, and carrier-grade NAT IP ranges (IPv4 and IPv6), validates URL schemes, and re-checks every redirect hop.
+- SSRF protection on the static fetch path: blocks private, loopback, link-local, multicast, reserved, carrier-grade NAT, benchmarking, and IPv4-mapped blocked IP ranges, validates URL schemes, allows NAT64 only for public embedded IPv4 addresses, and re-checks every redirect hop.
+- Fetch/render error messages and fetch redirect logs redact URL userinfo, query strings, and fragments.
 - Per-response size limit to prevent memory exhaustion from oversized payloads.

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import anyio
+import pytest
 
 from proctx_crawler.core.discovery import discover_page_links, discover_seed_urls, parse_llms_txt
 
@@ -116,10 +117,14 @@ class TestDiscoverSeedUrls:
 
         anyio.run(_test)
 
-    def test_unknown_source_returns_url(self) -> None:
+    @pytest.mark.parametrize("source", ["sitemaps", "all", "unknown"])
+    def test_unsupported_source_raises(self, source: str) -> None:
         async def _test() -> None:
-            result = await discover_seed_urls("https://example.com", "sitemaps")
-            assert result == ["https://example.com"]
+            with pytest.raises(ValueError, match="Unsupported discovery source"):
+                await discover_seed_urls(
+                    "https://example.com",
+                    source,  # type: ignore[arg-type]
+                )
 
         anyio.run(_test)
 

@@ -278,7 +278,7 @@ class CrawlConfig(BaseModel):
     url: str
     limit: int = Field(default=10, ge=1)
     depth: int = Field(default=1000, ge=0)
-    source: Literal["links", "llms_txt", "sitemaps", "all"] = "links"
+    source: Literal["links", "llms_txt"] = "links"
     formats: list[Literal["markdown", "html"]] = ["markdown"]
     render: bool = False
     goto_options: GotoOptions | None = None
@@ -404,9 +404,16 @@ The crawl engine uses a breadth-first search with an explicit FIFO queue.
 ```python
 # Pseudocode — actual implementation in core/engine.py
 
-async def run_crawl(job: Job, repo: Repository, storage: ContentStorage):
+async def run_crawl(
+    job: Job,
+    repo: Repository,
+    storage: ContentStorage,
+    job_timeout: int | None = None,
+):
     queue: deque[QueueEntry] = deque()
     visited: set[str] = set()
+    deadline = monotonic() + job_timeout if job_timeout is not None else None
+    timed_out = False
 
     # Seed the queue
     seed_urls = await discover_seed_urls(job.config)
@@ -420,6 +427,9 @@ async def run_crawl(job: Job, repo: Repository, storage: ContentStorage):
 
     completed_count = 0
     while queue and completed_count < job.config.limit:
+        if deadline is not None and monotonic() >= deadline:
+            timed_out = True
+            break
         if await repo.is_job_cancelled(job.id):
             break
 
@@ -447,8 +457,15 @@ async def run_crawl(job: Job, repo: Repository, storage: ContentStorage):
         except CrawlerError as e:
             await repo.mark_url_errored(job.id, entry.url, str(e))
 
+        if deadline is not None and monotonic() >= deadline:
+            timed_out = True
+            break
+
     # Finalise
-    status = JobStatus.CANCELLED if await repo.is_job_cancelled(job.id) else JobStatus.COMPLETED
+    cancelled = timed_out or await repo.is_job_cancelled(job.id)
+    if cancelled:
+        await repo.cancel_queued_urls(job.id)
+    status = JobStatus.CANCELLED if cancelled else JobStatus.COMPLETED
     await storage.write_manifest(job.id)
     await repo.update_job_status(job.id, status)
 ```
@@ -466,8 +483,8 @@ async def run_crawl(job: Job, repo: Repository, storage: ContentStorage):
 |--------|-----------|--------------------|
 | `"links"` | Starting URL only | Parse `<a href>` from each crawled page |
 | `"llms_txt"` | Parse starting URL as llms.txt, extract all links | None — only seed URLs are crawled |
-| `"sitemaps"` [v0.2] | Parse `sitemap.xml` from starting URL's domain | None — only sitemap URLs are crawled |
-| `"all"` [v0.2] | Sitemap URLs + starting URL | Parse `<a href>` from each crawled page (for pages not found via sitemap) |
+| `"sitemaps"` [v0.2] | Roadmap only; rejected by v0.1 input validation | None |
+| `"all"` [v0.2] | Roadmap only; rejected by v0.1 input validation | None |
 
 **llms.txt parsing**: The starting URL is fetched and parsed as a plain text file. The parser extracts all HTTP(S) URLs found in the file using two strategies:
 
@@ -489,7 +506,7 @@ Before checking the visited set or comparing URLs, all URLs are normalised:
 5. Remove fragment (`#section`)
 6. Sort query parameters alphabetically
 7. Remove empty query string (`?` with no params)
-8. Percent-decode unreserved characters, re-encode with uppercase hex
+8. Percent-decode unreserved characters only; reserved delimiters such as `%2F`, `%3F`, and `%23` remain encoded with uppercase hex
 
 ```python
 normalise_url("HTTPS://Docs.Example.Com:443/api/../guide/?b=2&a=1#section")
@@ -1112,7 +1129,7 @@ When `DELETE /crawl?id=<job_id>` is called:
 
 ### 8.4 Timeout and Cleanup
 
-**Job timeout**: A configurable maximum runtime per job (default: 1 hour). This setting exists in `Settings` but is not yet enforced in the v0.1 runtime.
+**Job timeout**: A configurable maximum runtime per job (default: 1 hour, minimum 1 second). The crawl engine enforces it cooperatively by checking the deadline before each queued URL starts and again after each URL completes. It does not abort an in-flight static fetch or render. On timeout, queued URLs are marked `cancelled`, counts are recalculated, `manifest.json` is written, and the job status becomes `cancelled`.
 
 **Metadata cleanup**: The retention setting also exists in `Settings` but is not yet enforced in the v0.1 runtime. Content files on disk are never auto-deleted by the current implementation.
 
@@ -1375,7 +1392,7 @@ class Crawler:
         *,
         limit: int = 10,
         depth: int = 1000,
-        source: str = "links",
+        source: Literal["links", "llms_txt"] = "links",
         formats: list[str] | None = None,
         render: bool = False,
         **kwargs: Any,
@@ -1386,7 +1403,7 @@ class Crawler:
                              formats=resolved_formats, render=render, **kwargs)
         job = await build_and_persist_job(url, config, self._repo)
         pool = await self._ensure_browser_pool() if render else None
-        await run_crawl(job, self._repo, self._storage, pool)
+        await run_crawl(job, self._repo, self._storage, pool, job_timeout=self._job_timeout)
         return await collect_crawl_result(job.id, self._repo, self._storage, resolved_formats)
 
     async def markdown(self, url: str, *, render: bool = False, **kwargs: Any) -> str:
@@ -1528,7 +1545,7 @@ class Settings(BaseSettings):
     # Crawl defaults
     default_limit: int = 10
     default_depth: int = 1000
-    job_timeout: int = 3600           # defined, not yet enforced in v0.1
+    job_timeout: int = 3600           # cooperative crawl watchdog, minimum 1 second
     max_concurrent_jobs: int = 10     # defined, not yet enforced in v0.1
     max_response_size: int = 10485760 # enforced on static fetches
     metadata_retention_days: int = 7  # defined, not yet enforced in v0.1

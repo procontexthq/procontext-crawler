@@ -35,11 +35,11 @@ This document defines the execution plan for building ProContext Crawler v0.1. I
 
 The project has:
 
-- Project skeleton: `pyproject.toml`, dependencies, dev tooling config (ruff, pyright, pytest)
-- Empty package directories: `src/proctx_crawler/{api,core,extractors,models}/`
+- v0.1 Python, HTTP, and CLI surfaces implemented and tested
+- Static fetch, opt-in rendering, BFS crawl, `llms.txt`, SQLite metadata, and file storage implemented
 - Complete spec documents: functional, technical, API reference, security
 - Research documents and brain dump
-- No implementation code
+- Remaining post-v0.1 work tracked in Section 8; job timeout is enforced cooperatively, while concurrent job limits and retention cleanup remain future scheduling controls
 
 ---
 
@@ -62,7 +62,7 @@ From the functional spec (Section 4.1):
 - HTTP API (FastAPI)
 - CLI (`proctx-crawler` commands)
 
-**Security controls (v0.1)**: SSRF protection (static fetcher), response size limits, job timeouts, concurrent job limits, API key auth, SHA-256 filenames.
+**Security controls (v0.1)**: SSRF protection (static fetcher), response size limits, API key auth, SHA-256 filenames, and cooperative job timeout enforcement. Concurrent job limit settings are present but not enforced by the v0.1 runtime.
 
 ---
 
@@ -389,10 +389,10 @@ Phase 1: Foundation (models, config, logging, url_utils)
 
 | Task | Description |
 |------|-------------|
-| **Local test server** | A tiny FastAPI app in `tests/fixtures/` serving static HTML pages with known content and link structure. Used by integration tests instead of hitting real websites. |
+| **Local test server** | Pending. Current integration tests use mocked fetches and in-process ASGI clients; `tests/fixtures/` is not present yet. |
 | **End-to-end crawl test** | Start a crawl against the local test server, verify output files, job status, and record content. |
 | **End-to-end single-page tests** | `/markdown`, `/content`, `/links` against the local test server. |
-| **Playwright integration test** | At least one test using real Playwright against the local test server (not mocked). Marked with a pytest marker so it can be skipped in CI without Playwright installed. |
+| **Playwright integration test** | Pending. Current Playwright coverage is mocked unit coverage; no real-browser integration marker exists yet. |
 | **README update** | Update README.md with installation, quickstart, usage examples. |
 | **Coverage check** | Verify ≥90% branch coverage. Add tests for any uncovered paths. |
 | **Linting pass** | `ruff check`, `ruff format`, `pyright` all clean. |
@@ -452,7 +452,7 @@ All of the following must be true before v0.1 is tagged:
 - [ ] SQLite repository with WAL mode
 - [ ] Job lifecycle: queued → running → completed/cancelled/errored
 - [ ] Cursor-based pagination for crawl results
-- [ ] Job timeout enforcement
+- [ ] Job timeout enforcement (cooperative watchdog cancels queued URLs; no mid-fetch abort)
 - [ ] Optional API key authentication
 - [ ] `ruff check` and `ruff format` clean
 - [ ] `pyright` clean (standard mode)

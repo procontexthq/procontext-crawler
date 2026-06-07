@@ -142,7 +142,7 @@ Every subcommand accepts `--db-path PATH` and `--output-dir PATH` to override `d
 | `db_path` | `<platformdirs data>/crawler.db` | SQLite metadata store |
 | `server_host` / `server_port` | `127.0.0.1` / `8080` | API bind address |
 | `default_limit` / `default_depth` | `10` / `1000` | Defined in settings, but not yet enforced as shared runtime defaults |
-| `job_timeout` | `3600` | Defined in settings, but not yet enforced by a watchdog |
+| `job_timeout` | `3600` | Enforced as a cooperative crawl watchdog; queued URLs are cancelled after timeout |
 | `max_concurrent_jobs` | `10` | Defined in settings for future scheduling controls; not yet enforced |
 | `max_response_size` | `10 MB` | Enforced per-response byte ceiling on the static fetch path |
 | `metadata_retention_days` | `7` | Defined in settings for future cleanup; not yet enforced |

@@ -29,8 +29,12 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 
-def _make_job(job_id: str = "job-1", url: str = "https://example.com") -> Job:
-    now = datetime.now(UTC)
+def _make_job(
+    job_id: str = "job-1",
+    url: str = "https://example.com",
+    created_at: datetime | None = None,
+) -> Job:
+    now = created_at or datetime.now(UTC)
     return Job(
         id=job_id,
         url=url,
@@ -91,7 +95,25 @@ class TestUpdateJobStatus:
         assert updated is not None
         assert updated.status == JobStatus.RUNNING
         assert updated.updated_at > job.updated_at
+        assert updated.started_at is not None
         assert updated.finished_at is None
+
+    @pytest.mark.anyio()
+    async def test_repeated_running_update_preserves_started_at(
+        self, repo: SQLiteRepository
+    ) -> None:
+        job = _make_job()
+        await repo.create_job(job)
+
+        await repo.update_job_status(job.id, JobStatus.RUNNING)
+        first = await repo.get_job(job.id)
+        assert first is not None
+        assert first.started_at is not None
+
+        await repo.update_job_status(job.id, JobStatus.RUNNING)
+        second = await repo.get_job(job.id)
+        assert second is not None
+        assert second.started_at == first.started_at
 
     @pytest.mark.anyio()
     async def test_update_to_completed_sets_finished_at(self, repo: SQLiteRepository) -> None:
@@ -142,6 +164,34 @@ class TestUpdateJobCounts:
         assert updated is not None
         assert updated.total == 10
         assert updated.finished == 5
+
+
+class TestListJobs:
+    @pytest.mark.anyio()
+    async def test_lists_jobs_by_created_at_newest_first(self, repo: SQLiteRepository) -> None:
+        oldest = datetime(2026, 3, 16, 10, 0, tzinfo=UTC)
+        middle = datetime(2026, 3, 16, 11, 0, tzinfo=UTC)
+        newest = datetime(2026, 3, 16, 12, 0, tzinfo=UTC)
+        jobs = [
+            _make_job("job-newest", "https://example.com/newest", newest),
+            _make_job("job-oldest", "https://example.com/oldest", oldest),
+            _make_job("job-middle", "https://example.com/middle", middle),
+        ]
+        for job in jobs:
+            await repo.create_job(job)
+
+        listed = await repo.list_jobs()
+
+        assert [job.id for job in listed] == ["job-newest", "job-middle", "job-oldest"]
+
+    @pytest.mark.anyio()
+    async def test_list_jobs_limit_and_offset(self, repo: SQLiteRepository) -> None:
+        for i in range(5):
+            await repo.create_job(_make_job(f"job-{i}", f"https://example.com/{i}"))
+
+        listed = await repo.list_jobs(limit=2, offset=1)
+
+        assert [job.id for job in listed] == ["job-3", "job-2"]
 
 
 class TestIsJobCancelled:
@@ -265,6 +315,22 @@ class TestGetUrlRecords:
         assert len(all_urls) == 5
 
     @pytest.mark.anyio()
+    async def test_exact_final_page_has_no_cursor(self, repo: SQLiteRepository) -> None:
+        job = _make_job()
+        await repo.create_job(job)
+
+        for i in range(4):
+            await repo.enqueue_url(job.id, f"https://example.com/page{i}", depth=0)
+
+        page1, cursor1 = await repo.get_url_records(job.id, limit=2)
+        assert len(page1) == 2
+        assert cursor1 is not None
+
+        page2, cursor2 = await repo.get_url_records(job.id, limit=2, cursor=cursor1)
+        assert len(page2) == 2
+        assert cursor2 is None
+
+    @pytest.mark.anyio()
     async def test_cursor_pagination_with_live_inserts(self, repo: SQLiteRepository) -> None:
         job = _make_job()
         await repo.create_job(job)
@@ -307,6 +373,28 @@ class TestGetUrlRecords:
 
         queued, _ = await repo.get_url_records(job.id, status=UrlStatus.QUEUED)
         assert len(queued) == 2
+
+    @pytest.mark.anyio()
+    async def test_status_filter_exact_final_page_has_no_cursor(
+        self, repo: SQLiteRepository
+    ) -> None:
+        job = _make_job()
+        await repo.create_job(job)
+
+        for i in range(4):
+            url = f"https://example.com/page{i}"
+            await repo.enqueue_url(job.id, url, depth=0)
+            await repo.mark_url_completed(job.id, url, http_status=200)
+
+        page1, cursor1 = await repo.get_url_records(job.id, limit=2, status=UrlStatus.COMPLETED)
+        assert len(page1) == 2
+        assert cursor1 is not None
+
+        page2, cursor2 = await repo.get_url_records(
+            job.id, limit=2, cursor=cursor1, status=UrlStatus.COMPLETED
+        )
+        assert len(page2) == 2
+        assert cursor2 is None
 
     @pytest.mark.anyio()
     async def test_empty_returns_empty_list_and_none(self, repo: SQLiteRepository) -> None:

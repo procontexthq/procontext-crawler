@@ -10,6 +10,7 @@ import structlog
 from pydantic import BaseModel
 
 from proctx_crawler.core.ssrf import resolve_and_check_ip, validate_url_scheme
+from proctx_crawler.core.url_utils import redact_url, redact_url_references
 from proctx_crawler.models import ErrorCode, FetchError
 
 if TYPE_CHECKING:
@@ -84,7 +85,7 @@ async def fetch_static(
         if not hostname:
             raise FetchError(
                 code=ErrorCode.FETCH_FAILED,
-                message=f"Invalid URL (no hostname): {current_url}",
+                message=f"Invalid URL (no hostname): {redact_url(current_url)}",
                 recoverable=False,
             )
 
@@ -117,7 +118,7 @@ async def fetch_static(
                     log.debug(
                         "fetch_redirect",
                         status=response.status_code,
-                        location=current_url,
+                        location=redact_url(current_url),
                     )
                     continue
 
@@ -138,19 +139,27 @@ async def fetch_static(
         except httpx.TimeoutException as exc:
             raise FetchError(
                 code=ErrorCode.FETCH_FAILED,
-                message=f"Timeout fetching {current_url}: {exc}",
+                message=(
+                    f"Timeout fetching {redact_url(current_url)}: {redact_url_references(str(exc))}"
+                ),
                 recoverable=True,
             ) from exc
         except httpx.ConnectError as exc:
             raise FetchError(
                 code=ErrorCode.FETCH_FAILED,
-                message=f"Connection error fetching {current_url}: {exc}",
+                message=(
+                    f"Connection error fetching {redact_url(current_url)}: "
+                    f"{redact_url_references(str(exc))}"
+                ),
                 recoverable=True,
             ) from exc
         except httpx.HTTPError as exc:
             raise FetchError(
                 code=ErrorCode.FETCH_FAILED,
-                message=f"HTTP error fetching {current_url}: {exc}",
+                message=(
+                    f"HTTP error fetching {redact_url(current_url)}: "
+                    f"{redact_url_references(str(exc))}"
+                ),
                 recoverable=True,
             ) from exc
 
@@ -171,27 +180,27 @@ def _check_http_status(response: httpx.Response) -> None:
     if status == 404:
         raise FetchError(
             code=ErrorCode.NOT_FOUND,
-            message=f"Page not found: {response.url}",
+            message=f"Page not found: {redact_url(str(response.url))}",
             recoverable=False,
         )
 
     if status == 429:
         raise FetchError(
             code=ErrorCode.FETCH_FAILED,
-            message=f"Rate limited (429): {response.url}",
+            message=f"Rate limited (429): {redact_url(str(response.url))}",
             recoverable=True,
         )
 
     if status >= 500:
         raise FetchError(
             code=ErrorCode.FETCH_FAILED,
-            message=f"Server error ({status}): {response.url}",
+            message=f"Server error ({status}): {redact_url(str(response.url))}",
             recoverable=True,
         )
 
     # Other 4xx errors
     raise FetchError(
         code=ErrorCode.FETCH_FAILED,
-        message=f"HTTP {status}: {response.url}",
+        message=f"HTTP {status}: {redact_url(str(response.url))}",
         recoverable=False,
     )

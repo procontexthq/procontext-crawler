@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 
 import httpx
@@ -10,6 +11,9 @@ import respx
 
 from proctx_crawler.core.fetcher import USER_AGENT, FetchResult, fetch_static
 from proctx_crawler.models import ErrorCode, FetchError
+
+if TYPE_CHECKING:
+    from pytest_mock import MockerFixture
 
 
 class _ExplodingAfterLimitStream(httpx.AsyncByteStream):
@@ -30,6 +34,12 @@ def _mock_dns_public(monkeypatch: pytest.MonkeyPatch) -> None:
         "proctx_crawler.core.fetcher.resolve_and_check_ip",
         lambda _hostname: "93.184.216.34",
     )
+
+
+def _assert_sensitive_url_parts_redacted(message: str) -> None:
+    assert "user:secret" not in message
+    assert "token=abc" not in message
+    assert "#frag" not in message
 
 
 # ---------------------------------------------------------------------------
@@ -82,6 +92,20 @@ class TestFetchStaticHttpErrors:
 
         assert exc_info.value.code == ErrorCode.NOT_FOUND
         assert exc_info.value.recoverable is False
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_404_error_message_redacts_url_parts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _mock_dns_public(monkeypatch)
+        respx.get("http://example.com/missing?token=abc").mock(return_value=httpx.Response(404))
+
+        with pytest.raises(FetchError) as exc_info:
+            await fetch_static("http://example.com/missing?token=abc#frag")
+
+        assert "http://example.com/missing" in exc_info.value.message
+        _assert_sensitive_url_parts_redacted(exc_info.value.message)
 
     @pytest.mark.anyio
     @respx.mock
@@ -146,6 +170,24 @@ class TestFetchStaticRedirects:
         assert result.status_code == 200
         assert result.url == "http://example.com/new"
         assert "New Page" in result.html
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_redirect_log_redacts_url_parts(
+        self, monkeypatch: pytest.MonkeyPatch, mocker: MockerFixture
+    ) -> None:
+        _mock_dns_public(monkeypatch)
+        debug = mocker.patch("proctx_crawler.core.fetcher.log.debug")
+        respx.get("http://example.com/old").mock(
+            return_value=httpx.Response(301, headers={"location": "/new?token=abc#frag"})
+        )
+        respx.get("http://example.com/new?token=abc").mock(
+            return_value=httpx.Response(200, html="<h1>New Page</h1>")
+        )
+
+        await fetch_static("http://example.com/old")
+
+        debug.assert_any_call("fetch_redirect", status=301, location="http://example.com/new")
 
     @pytest.mark.anyio
     @respx.mock
@@ -230,6 +272,24 @@ class TestFetchStaticNetworkErrors:
 
     @pytest.mark.anyio
     @respx.mock
+    async def test_timeout_error_message_redacts_url_parts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _mock_dns_public(monkeypatch)
+        respx.get("http://example.com/slow?token=abc").mock(
+            side_effect=httpx.ReadTimeout(
+                "Read timed out for http://user:secret@example.com/slow?token=abc#frag"
+            )
+        )
+
+        with pytest.raises(FetchError) as exc_info:
+            await fetch_static("http://example.com/slow?token=abc#frag")
+
+        assert "http://example.com/slow" in exc_info.value.message
+        _assert_sensitive_url_parts_redacted(exc_info.value.message)
+
+    @pytest.mark.anyio
+    @respx.mock
     async def test_connection_error_raises_recoverable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -242,6 +302,24 @@ class TestFetchStaticNetworkErrors:
             await fetch_static("http://example.com/down")
 
         assert exc_info.value.recoverable is True
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_connection_error_message_redacts_url_parts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _mock_dns_public(monkeypatch)
+        respx.get("http://example.com/down?token=abc").mock(
+            side_effect=httpx.ConnectError(
+                "Connection refused for http://user:secret@example.com/down?token=abc#frag"
+            )
+        )
+
+        with pytest.raises(FetchError) as exc_info:
+            await fetch_static("http://example.com/down?token=abc#frag")
+
+        assert "http://example.com/down" in exc_info.value.message
+        _assert_sensitive_url_parts_redacted(exc_info.value.message)
 
 
 # ---------------------------------------------------------------------------
@@ -306,6 +384,24 @@ class TestFetchStaticGenericHttpError:
 
         assert exc_info.value.code == ErrorCode.FETCH_FAILED
         assert exc_info.value.recoverable is True
+
+    @pytest.mark.anyio
+    @respx.mock
+    async def test_generic_http_error_message_redacts_url_parts(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _mock_dns_public(monkeypatch)
+        respx.get("http://example.com/broken?token=abc").mock(
+            side_effect=httpx.DecodingError(
+                "Decoding failed for http://user:secret@example.com/broken?token=abc#frag"
+            )
+        )
+
+        with pytest.raises(FetchError) as exc_info:
+            await fetch_static("http://example.com/broken?token=abc#frag")
+
+        assert "http://example.com/broken" in exc_info.value.message
+        _assert_sensitive_url_parts_redacted(exc_info.value.message)
 
 
 # ---------------------------------------------------------------------------
