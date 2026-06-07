@@ -36,7 +36,7 @@ This document defines the execution plan for building ProContext Crawler v0.1. I
 The project has:
 
 - v0.1 Python, HTTP, and CLI surfaces implemented and tested
-- Static fetch, opt-in rendering, BFS crawl, `llms.txt`, SQLite metadata, and file storage implemented
+- Static fetch, opt-in rendering, BFS crawl, automatic text-index/HTML discovery, SQLite metadata, and file storage implemented
 - Complete spec documents: functional, technical, API reference, security
 - Research documents and brain dump
 - Remaining post-v0.1 work tracked in Section 8; job timeout is enforced cooperatively, while concurrent job limits and retention cleanup remain future scheduling controls
@@ -52,7 +52,7 @@ From the functional spec (Section 4.1):
 **Capabilities**:
 - Single-page extraction: Markdown, HTML, links
 - Multi-page BFS crawl with link discovery
-- llms.txt URL discovery mode
+- Automatic URL discovery plus explicit `links` and `llms_txt` modes
 - URL include/exclude pattern matching
 - Domain filtering (subdomains, external links)
 - Static httpx fetch (default) + Playwright rendering (opt-in)
@@ -93,7 +93,7 @@ src/proctx_crawler/
         ssrf.py                     # SSRF validation — Phase 2
         engine.py                   # BFS crawl engine — Phase 6
         url_utils.py                # URL normalisation, pattern matching — Phase 1
-        discovery.py                # URL discovery strategies (links, llms_txt) — Phase 3
+        discovery.py                # URL discovery strategies (auto, links, llms_txt) — Phase 3
         repository.py               # Repository Protocol — Phase 4
 
     extractors/
@@ -125,7 +125,7 @@ tests/
         test_renderer.py            # Playwright renderer (mocked) — Phase 2
         test_markdown_extractor.py  # HTML-to-Markdown — Phase 3
         test_link_extractor.py      # Link extraction — Phase 3
-        test_discovery.py           # llms.txt parsing, link discovery — Phase 3
+        test_discovery.py           # text URL parsing, link discovery — Phase 3
         test_sqlite_repository.py   # SQLite repo — Phase 4
         test_content_storage.py     # Filesystem storage — Phase 5
         test_engine.py              # Crawl engine (mocked fetcher/repo) — Phase 6
@@ -235,7 +235,7 @@ Phase 1: Foundation (models, config, logging, url_utils)
 
 ### Phase 3: Extractors
 
-**Goal**: Given HTML, produce Markdown, extract links, and parse llms.txt.
+**Goal**: Given HTML, produce Markdown, extract links, and parse text URL indexes.
 
 **Files**:
 
@@ -244,7 +244,7 @@ Phase 1: Foundation (models, config, logging, url_utils)
 | `extractors/markdown.py` | `html_to_markdown()` — BeautifulSoup content selection (main/article/body), strip nav/header/footer/script, markdownify conversion |
 | `extractors/links.py` | `extract_links()` — parse `<a href>`, resolve relative URLs, skip fragments/mailto/javascript, deduplicate |
 | `extractors/content.py` | `extract_html()` — minimal wrapper, return raw HTML (or Playwright-rendered DOM) |
-| `core/discovery.py` | `discover_seed_urls()` — dispatch by source strategy. `parse_llms_txt()` — extract URLs from llms.txt format. `discover_page_links()` — wrapper around link extraction with domain/pattern filtering |
+| `core/discovery.py` | `discover_seed_urls()` — dispatch by source strategy. `extract_text_urls()` / `parse_llms_txt()` — extract URLs from text/Markdown indexes. `discover_page_links()` — wrapper around link extraction with domain/pattern filtering |
 
 **Tests**:
 
@@ -252,9 +252,9 @@ Phase 1: Foundation (models, config, logging, url_utils)
 |-----------|----------|
 | `test_markdown_extractor.py` | Basic HTML → Markdown, content selection (`<main>`, `<article>`, `<body>` fallback), nav/script stripping, empty page, malformed HTML |
 | `test_link_extractor.py` | Relative URL resolution, fragment-only links skipped, mailto/javascript skipped, deduplication, external links, empty page |
-| `test_discovery.py` | llms.txt parsing (markdown links, bare URLs, mixed content, empty file), link discovery with domain filtering, pattern filtering integration |
+| `test_discovery.py` | text URL parsing (Markdown links, reference links, bare URLs, embedded anchors, code skipping), link discovery with domain filtering, pattern filtering integration |
 
-**Definition of done**: `html_to_markdown("<html>...")` returns clean Markdown. `extract_links(html, base_url)` returns deduplicated absolute URLs. `parse_llms_txt(text)` extracts documentation URLs.
+**Definition of done**: `html_to_markdown("<html>...")` returns clean Markdown. `extract_links(html, base_url)` returns deduplicated absolute URLs. `extract_text_urls(text, base_url)` extracts crawlable documentation URLs.
 
 ---
 
@@ -313,7 +313,7 @@ Phase 1: Foundation (models, config, logging, url_utils)
 
 | Test File | Coverage |
 |-----------|----------|
-| `test_engine.py` | Uses mocked fetcher and in-memory repository. Tests: basic crawl (3 pages, linked), depth limit respected, page limit respected, URL pattern filtering, domain filtering, cancellation mid-crawl, error isolation (one page fails, others continue), llms_txt source (no per-page discovery), visited set prevents re-crawl, empty queue terminates |
+| `test_engine.py` | Uses mocked fetcher and in-memory repository. Tests: basic crawl (3 pages, linked), depth limit respected, page limit respected, URL pattern filtering, domain filtering, cancellation mid-crawl, error isolation (one page fails, others continue), auto and llms_txt source behavior, visited set prevents re-crawl, empty queue terminates |
 
 **Definition of done**: A mocked crawl of 5 interconnected pages completes with correct records. Limits, filters, and cancellation all work. Errors on individual URLs don't crash the crawl.
 
@@ -442,7 +442,7 @@ All of the following must be true before v0.1 is tagged:
 - [ ] Python API works: `async with Crawler() as c: result = await c.crawl(url)`
 - [ ] CLI works: `proctx-crawler crawl <url>`, `proctx-crawler markdown <url>`, `proctx-crawler serve`
 - [ ] BFS crawl with link discovery produces correct output files
-- [ ] llms.txt discovery mode parses and crawls listed URLs
+- [ ] Auto discovery and llms_txt discovery parse and crawl listed URLs
 - [ ] URL pattern matching (include/exclude, exclude wins)
 - [ ] Domain filtering (subdomain, external link controls)
 - [ ] Static fetch via httpx (default path)

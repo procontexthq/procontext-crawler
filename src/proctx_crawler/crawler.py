@@ -103,7 +103,7 @@ class Crawler:
         *,
         limit: int = 10,
         depth: int = 1000,
-        source: Literal["links", "llms_txt"] = "links",
+        source: Literal["auto", "links", "llms_txt"] = "auto",
         formats: list[Literal["markdown", "html"]] | None = None,
         render: bool = False,
         goto_options: dict[str, Any] | None = None,

@@ -15,7 +15,7 @@ Inspired by [Cloudflare's Browser Rendering `/crawl` endpoint](https://developer
 Most crawl tools fall into one of two camps: hosted SaaS APIs that ship your URLs to a vendor, or research-grade frameworks that require deep configuration before you get anything useful out. ProContext Crawler is deliberately neither.
 
 - **Self-hosted, no vendor.** Run the HTTP API, import the Python class, or pipe from the CLI — your data never leaves your infrastructure.
-- **Documentation-shaped, not SEO-shaped.** The defaults (link discovery, `llms.txt` seeding, nav/footer stripping, Markdown output) are tuned for producing LLM-ingestible docs, not generic web scraping.
+- **Documentation-shaped, not SEO-shaped.** The defaults (automatic HTML vs text-index discovery, nav/footer stripping, Markdown output) are tuned for producing LLM-ingestible docs, not generic web scraping.
 - **Dual fetch paths by design.** Most pages never need a browser. Static fetch via `httpx` is the fast default; opt into Playwright only when you need it.
 - **Small surface, few dependencies.** One package, one SQLite file, one output directory. No queue workers, no Redis, no Docker required.
 
@@ -24,7 +24,7 @@ Most crawl tools fall into one of two camps: hosted SaaS APIs that ship your URL
 - **Multi-page BFS crawl** — discover linked pages up to a configurable depth and page limit
 - **Multiple output formats** — Markdown, raw HTML, or link lists
 - **Dual fetch paths** — fast static fetch via `httpx` (default) or full JavaScript rendering via Playwright (`render: true`)
-- **llms.txt discovery** — seed a crawl from an `llms.txt` index instead of following links
+- **Automatic discovery** — HTML pages use `<a href>` links; `llms.txt`, Markdown, and plain-text indexes use robust text URL parsing
 - **URL filtering** — include/exclude glob patterns (exclude wins), subdomain control, external link toggling
 - **Async job lifecycle** — POST to start, GET to poll, DELETE to cancel; cursor-based pagination for results
 - **Three interfaces** — Python API (`Crawler` async context manager), HTTP API (FastAPI), and CLI (`proctx-crawler …`)
@@ -63,14 +63,16 @@ uv run proctx-crawler crawl https://example.com/docs \
     --include "*/docs/*" --exclude "*/changelog*" \
     --output-dir ./out
 
-# Seed from an llms.txt index instead of link discovery
-uv run proctx-crawler crawl https://example.com/llms.txt --source llms_txt
+# Crawl an llms.txt, Markdown, or plain-text URL index
+uv run proctx-crawler crawl https://example.com/llms.txt
 
 # Start the HTTP API server
 uv run proctx-crawler serve --host 127.0.0.1 --port 8080
 ```
 
 Add `--render` to any subcommand to route through Playwright for JavaScript-heavy pages.
+
+`crawl` defaults to `--source auto`: HTML pages discover children from `<a href>` tags, while `llms.txt`, `.txt`, `.md`, `.markdown`, `.rst`, and text-like content types are parsed as URL indexes. Use `--source links` to force HTML-link behavior or `--source llms_txt` to force text-index behavior.
 
 ### Python API
 

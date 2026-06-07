@@ -64,9 +64,9 @@ def _build_parser() -> argparse.ArgumentParser:
     crawl_parser.add_argument("--depth", type=int, default=1000, help="Max link depth")
     crawl_parser.add_argument(
         "--source",
-        choices=["links", "llms_txt"],
-        default="links",
-        help="Discovery source (default: links)",
+        choices=["auto", "links", "llms_txt"],
+        default="auto",
+        help="Discovery source (default: auto)",
     )
     crawl_parser.add_argument(
         "--format",

@@ -209,6 +209,27 @@ class TestCrawl:
         assert completed[0].html is None
 
     @pytest.mark.anyio
+    async def test_crawl_default_source_auto_parses_llms_txt(
+        self, tmp_path: Path, mocker: MockerFixture
+    ) -> None:
+        pages = {
+            "https://example.com/llms.txt": (
+                200,
+                "- [A](https://example.com/a)\n- [B](https://example.com/b)\n",
+            ),
+            "https://example.com/a": (200, _html("A")),
+            "https://example.com/b": (200, _html("B")),
+        }
+        _patch_fetcher(mocker, pages)
+
+        async with Crawler(output_dir=tmp_path / "out", db_path=tmp_path / "test.db") as crawler:
+            with anyio.fail_after(10):
+                result = await crawler.crawl("https://example.com/llms.txt", limit=10)
+
+        completed_urls = {r.url for r in result.records if r.status == UrlStatus.COMPLETED}
+        assert completed_urls == {"https://example.com/a", "https://example.com/b"}
+
+    @pytest.mark.anyio
     async def test_unsupported_source_is_rejected(self, tmp_path: Path) -> None:
         async with Crawler(output_dir=tmp_path / "out", db_path=tmp_path / "test.db") as crawler:
             with pytest.raises(ValidationError):

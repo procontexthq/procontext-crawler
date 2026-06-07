@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import anyio
 import pytest
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
 # ---------------------------------------------------------------------------
 
 _BASE_URL = "https://example.com"
+PageFixture = tuple[int, str] | tuple[int, str, dict[str, str]]
 
 
 def _html(title: str, body: str = "", links: list[str] | None = None) -> str:
@@ -81,6 +83,15 @@ def _make_fetch_result(url: str) -> FetchResult:
     return FetchResult(url=url, status_code=status_code, html=html, headers={})
 
 
+def _page_fixture_parts(page: PageFixture) -> tuple[int, str, dict[str, str]]:
+    """Return status, body, and headers from a page fixture."""
+    if len(page) == 2:
+        status_code, html = page
+        return status_code, html, {}
+    status_code, html, headers = page
+    return status_code, html, headers
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -123,7 +134,7 @@ def storage(tmp_path: Path) -> ContentStorage:
     return ContentStorage(tmp_path / "output")
 
 
-def _patch_fetcher(mocker: MockerFixture, pages: dict[str, tuple[int, str]]) -> None:
+def _patch_fetcher(mocker: MockerFixture, pages: dict[str, PageFixture]) -> None:
     """Patch fetch_static to return pages from a lookup dict."""
 
     async def _mock_fetch(url: str, **_kwargs: object) -> FetchResult:
@@ -133,8 +144,8 @@ def _patch_fetcher(mocker: MockerFixture, pages: dict[str, tuple[int, str]]) -> 
                 message=f"Page not found: {url}",
                 recoverable=False,
             )
-        status_code, html = pages[url]
-        return FetchResult(url=url, status_code=status_code, html=html, headers={})
+        status_code, html, headers = _page_fixture_parts(pages[url])
+        return FetchResult(url=url, status_code=status_code, html=html, headers=headers)
 
     mocker.patch("proctx_crawler.core.engine.fetch_static", side_effect=_mock_fetch)
 
@@ -174,6 +185,8 @@ class TestQueueEntry:
         entry = QueueEntry(url="https://example.com", depth=2)
         assert entry.url == "https://example.com"
         assert entry.depth == 2
+        assert entry.discover_children is True
+        assert entry.prefetched_response is None
 
 
 class TestBasicCrawl:
@@ -765,6 +778,283 @@ class TestLlmsTxtSource:
         ]
 
 
+class TestAutoSource:
+    """Auto source classifies the start URL before choosing discovery behavior."""
+
+    @pytest.mark.anyio
+    async def test_auto_llms_txt_parses_listed_urls(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        llms_txt_content = (
+            "# llms.txt\n- [Page A](https://example.com/a)\n- [Page B](https://example.com/b)\n"
+        )
+        pages: dict[str, PageFixture] = {
+            "https://example.com/llms.txt": (200, llms_txt_content),
+            "https://example.com/a": (
+                200,
+                _html("Page A", links=["https://example.com/should-not-follow"]),
+            ),
+            "https://example.com/b": (200, _html("Page B")),
+            "https://example.com/should-not-follow": (200, _html("Hidden")),
+        }
+        _patch_fetcher(mocker, pages)
+
+        job = _make_job(url="https://example.com/llms.txt", source="auto", limit=10)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage)
+
+        completed, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.COMPLETED)
+        completed_urls = {record.url for record in completed}
+        assert completed_urls == {"https://example.com/a", "https://example.com/b"}
+
+    @pytest.mark.anyio
+    async def test_auto_text_content_type_parses_urls(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        text_index = "- [Relative](./a)\nhttps://example.com/b#section\n"
+        pages: dict[str, PageFixture] = {
+            "https://example.com/index": (
+                200,
+                text_index,
+                {"content-type": "text/markdown; charset=utf-8"},
+            ),
+            "https://example.com/a": (200, _html("A")),
+            "https://example.com/b": (200, _html("B")),
+        }
+        _patch_fetcher(mocker, pages)
+
+        job = _make_job(url="https://example.com/index", source="auto", limit=10)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage)
+
+        records, _ = await repo.get_url_records(job.id, limit=100)
+        assert [record.url for record in records] == [
+            "https://example.com/a",
+            "https://example.com/b",
+        ]
+
+    @pytest.mark.anyio
+    async def test_auto_unknown_non_html_body_is_treated_as_text(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        pages: dict[str, PageFixture] = {
+            "https://example.com/index": (200, "Docs: https://example.com/a\n"),
+            "https://example.com/a": (200, _html("A")),
+        }
+        _patch_fetcher(mocker, pages)
+
+        job = _make_job(url="https://example.com/index", source="auto", limit=10)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage)
+
+        records, _ = await repo.get_url_records(job.id, limit=100)
+        assert [record.url for record in records] == ["https://example.com/a"]
+
+    @pytest.mark.anyio
+    async def test_auto_html_uses_anchor_discovery_not_visible_text_urls(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        pages: dict[str, PageFixture] = {
+            "https://example.com": (
+                200,
+                _html(
+                    "Home",
+                    body="<p>Visible URL: https://example.com/not-linked</p>",
+                    links=["https://example.com/linked"],
+                ),
+                {"content-type": "text/html"},
+            ),
+            "https://example.com/linked": (200, _html("Linked")),
+            "https://example.com/not-linked": (200, _html("Not Linked")),
+        }
+        _patch_fetcher(mocker, pages)
+
+        job = _make_job(source="auto", limit=10, depth=1)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage)
+
+        completed, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.COMPLETED)
+        completed_urls = {record.url for record in completed}
+        assert "https://example.com" in completed_urls
+        assert "https://example.com/linked" in completed_urls
+        assert "https://example.com/not-linked" not in completed_urls
+
+    @pytest.mark.anyio
+    async def test_explicit_links_with_llms_txt_crawls_original_only(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        pages: dict[str, PageFixture] = {
+            "https://example.com/llms.txt": (
+                200,
+                "- [Page A](https://example.com/a)\nhttps://example.com/b\n",
+                {"content-type": "text/plain"},
+            ),
+            "https://example.com/a": (200, _html("A")),
+            "https://example.com/b": (200, _html("B")),
+        }
+        _patch_fetcher(mocker, pages)
+
+        job = _make_job(url="https://example.com/llms.txt", source="links", limit=10)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage)
+
+        completed, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.COMPLETED)
+        assert [record.url for record in completed] == ["https://example.com/llms.txt"]
+
+    @pytest.mark.anyio
+    async def test_auto_text_page_without_urls_crawls_original(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        pages: dict[str, PageFixture] = {
+            "https://example.com/readme.txt": (
+                200,
+                "This text file has no crawlable links.",
+                {"content-type": "text/plain"},
+            )
+        }
+        _patch_fetcher(mocker, pages)
+
+        job = _make_job(url="https://example.com/readme.txt", source="auto", limit=10)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage)
+
+        completed, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.COMPLETED)
+        assert [record.url for record in completed] == ["https://example.com/readme.txt"]
+
+    @pytest.mark.anyio
+    async def test_auto_text_page_with_render_reuses_static_prefetch(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        pages: dict[str, PageFixture] = {
+            "https://example.com/readme.txt": (
+                200,
+                "This text file has no crawlable links.",
+                {"content-type": "text/plain"},
+            )
+        }
+        _patch_fetcher(mocker, pages)
+        fetch_rendered = mocker.patch("proctx_crawler.core.engine.fetch_rendered")
+
+        job = _make_job(url="https://example.com/readme.txt", source="auto", limit=10)
+        job.config.render = True
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage, browser_pool=None)
+
+        fetch_rendered.assert_not_awaited()
+        completed, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.COMPLETED)
+        assert [record.url for record in completed] == ["https://example.com/readme.txt"]
+
+    @pytest.mark.anyio
+    async def test_auto_classification_fetch_error_uses_url_level_error_path(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        async def _raise_fetch_error(url: str, **_kwargs: object) -> FetchResult:
+            raise FetchError(
+                code=ErrorCode.FETCH_FAILED,
+                message=f"Connection error fetching {url}",
+                recoverable=True,
+            )
+
+        fetch_static = mocker.patch(
+            "proctx_crawler.core.engine.fetch_static",
+            side_effect=_raise_fetch_error,
+        )
+
+        job = _make_job(source="auto", limit=10)
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage)
+
+        final_job = await repo.get_job(job.id)
+        assert final_job is not None
+        assert final_job.status == JobStatus.COMPLETED
+        assert fetch_static.await_count == 2
+
+        errored, _ = await repo.get_url_records(job.id, limit=100, status=UrlStatus.ERRORED)
+        assert [record.url for record in errored] == ["https://example.com"]
+
+    @pytest.mark.anyio
+    async def test_auto_html_render_does_not_reuse_static_prefetch(
+        self,
+        repo: SQLiteRepository,
+        storage: ContentStorage,
+        mocker: MockerFixture,
+    ) -> None:
+        static_result = FetchResult(
+            url="https://example.com",
+            status_code=200,
+            html=_html("Static", body="<h1>Static</h1>"),
+            headers={"content-type": "text/html"},
+        )
+        rendered_result = FetchResult(
+            url="https://example.com",
+            status_code=200,
+            html=_html("Rendered", body="<h1>Rendered</h1>"),
+            headers={"content-type": "text/html"},
+        )
+        fetch_static = mocker.patch(
+            "proctx_crawler.core.engine.fetch_static",
+            return_value=static_result,
+        )
+        fetch_rendered = mocker.patch(
+            "proctx_crawler.core.engine.fetch_rendered",
+            return_value=rendered_result,
+        )
+
+        job = _make_job(source="auto", limit=1, depth=0)
+        job.config.render = True
+        await repo.create_job(job)
+
+        with anyio.fail_after(5):
+            await run_crawl(job, repo, storage, browser_pool=AsyncMock())
+
+        fetch_static.assert_awaited_once()
+        fetch_rendered.assert_awaited_once()
+        content = await storage.read(job.id, "https://example.com", "markdown")
+        assert content is not None
+        assert "Rendered" in content
+        assert "Static" not in content
+
+
 class TestVisitedSetDeduplication:
     """Two pages link to each other. Each is crawled only once."""
 
@@ -998,8 +1288,6 @@ class TestRenderPathInEngine:
             "proctx_crawler.core.engine.fetch_rendered",
             return_value=mock_result,
         )
-
-        from unittest.mock import AsyncMock
 
         mock_pool = AsyncMock()
 

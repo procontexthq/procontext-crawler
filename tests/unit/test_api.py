@@ -155,6 +155,8 @@ class TestPostCrawl:
         uuid.UUID(data["result"])
 
         mock_repo.create_job.assert_awaited_once()
+        created_job = mock_repo.create_job.await_args.args[0]
+        assert created_job.config.source == "auto"
         mock_task_group.start_soon.assert_called_once()
         start_args = mock_task_group.start_soon.call_args.args
         assert start_args[0].__name__ == "run_crawl"
@@ -171,7 +173,7 @@ class TestPostCrawl:
         assert data["error"]["code"] == "INVALID_INPUT"
 
     @pytest.mark.anyio
-    @pytest.mark.parametrize("source", ["sitemaps", "all"])
+    @pytest.mark.parametrize("source", ["sitemaps", "all", "unknown"])
     async def test_v02_sources_return_invalid_input(
         self, client: httpx.AsyncClient, source: str
     ) -> None:
