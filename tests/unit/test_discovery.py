@@ -5,7 +5,12 @@ from __future__ import annotations
 import anyio
 import pytest
 
-from proctx_crawler.core.discovery import discover_page_links, discover_seed_urls, parse_llms_txt
+from proctx_crawler.core.discovery import (
+    discover_page_links,
+    discover_seed_urls,
+    extract_text_urls,
+    parse_llms_txt,
+)
 
 # ---------------------------------------------------------------------------
 # parse_llms_txt
@@ -89,12 +94,106 @@ https://docs.example.com/guide
         assert "https://example.com/page" in result
 
 
+class TestExtractTextUrls:
+    def test_markdown_reference_and_autolinks_extracted(self) -> None:
+        text = """
+[Guide][guide]
+
+[guide]: https://docs.example.com/guide
+Autolink: <https://docs.example.com/api>
+"""
+        result = extract_text_urls(text, base_url="https://docs.example.com/llms.txt")
+        assert result == [
+            "https://docs.example.com/guide",
+            "https://docs.example.com/api",
+        ]
+
+    def test_html_anchors_and_relative_links_resolved(self) -> None:
+        text = """
+- [Relative guide](/guide)
+<a href="../api">API</a>
+"""
+        result = extract_text_urls(text, base_url="https://docs.example.com/docs/llms.txt")
+        assert result == [
+            "https://docs.example.com/guide",
+            "https://docs.example.com/api",
+        ]
+
+    def test_html_block_anchor_extracted(self) -> None:
+        text = '<div><a href="https://example.com/from-html-block">HTML block</a></div>'
+        result = extract_text_urls(text)
+        assert result == ["https://example.com/from-html-block"]
+
+    def test_empty_markdown_link_target_ignored(self) -> None:
+        text = "[Empty]()"
+        result = extract_text_urls(text, base_url="https://docs.example.com/llms.txt")
+        assert result == []
+
+    def test_bare_url_punctuation_and_balanced_parentheses(self) -> None:
+        text = """
+See https://example.com/path(foo(bar)).
+Also (https://example.com/wrapped).
+"""
+        result = extract_text_urls(text)
+        assert result == [
+            "https://example.com/path(foo(bar))",
+            "https://example.com/wrapped",
+        ]
+
+    def test_fragment_removed_and_normalized_duplicates_deduped(self) -> None:
+        text = """
+https://EXAMPLE.com:443/docs#intro
+[Same](https://example.com/docs)
+https://example.com/docs?b=2&a=1
+https://example.com/docs?a=1&b=2
+"""
+        result = extract_text_urls(text)
+        assert result == [
+            "https://EXAMPLE.com:443/docs",
+            "https://example.com/docs?b=2&a=1",
+        ]
+
+    def test_code_blocks_and_inline_code_are_skipped(self) -> None:
+        text = """
+`https://example.com/inline-code`
+
+    https://example.com/indented-code
+
+```markdown
+https://example.com/fenced-code
+[Code](https://example.com/code-link)
+```
+
+https://example.com/visible
+"""
+        result = extract_text_urls(text)
+        assert result == ["https://example.com/visible"]
+
+    def test_invalid_and_non_http_candidates_ignored(self) -> None:
+        text = """
+ftp://example.com/file
+mailto:docs@example.com
+[No host](https:///missing-host)
+[JS](javascript:alert(1))
+[Valid](https://example.com/valid)
+"""
+        result = extract_text_urls(text)
+        assert result == ["https://example.com/valid"]
+
+
 # ---------------------------------------------------------------------------
 # discover_seed_urls
 # ---------------------------------------------------------------------------
 
 
 class TestDiscoverSeedUrls:
+    def test_auto_source_returns_url(self) -> None:
+        async def _test() -> None:
+            result = await discover_seed_urls("https://example.com", "auto")
+            assert result == ["https://example.com"]
+
+        anyio.run(_test)
+
     def test_links_source_returns_url(self) -> None:
         async def _test() -> None:
             result = await discover_seed_urls("https://example.com", "links")

@@ -174,7 +174,7 @@ class TestCrawlConfig:
         cfg = CrawlConfig(url="https://example.com")
         assert cfg.limit == 10
         assert cfg.depth == 1000
-        assert cfg.source == "links"
+        assert cfg.source == "auto"
         assert cfg.formats == ["markdown"]
         assert cfg.render is False
         assert cfg.goto_options is None
@@ -216,13 +216,18 @@ class TestCrawlConfig:
         assert cfg.goto_options is not None
         assert cfg.goto_options.timeout == 60000
 
+    @pytest.mark.parametrize("source", ["auto", "links", "llms_txt"])
+    def test_source_values(self, source: str) -> None:
+        cfg = CrawlConfig(url="https://example.com", source=source)  # type: ignore[arg-type]
+        assert cfg.source == source
+
     def test_serialisation_roundtrip(self) -> None:
         cfg = CrawlConfig(url="https://example.com", limit=5)
         data = cfg.model_dump()
         restored = CrawlConfig.model_validate(data)
         assert restored == cfg
 
-    @pytest.mark.parametrize("source", ["sitemaps", "all"])
+    @pytest.mark.parametrize("source", ["sitemaps", "all", "unknown"])
     def test_v02_sources_rejected_in_v01(self, source: str) -> None:
         with pytest.raises(ValidationError):
             CrawlConfig(url="https://example.com", source=source)  # type: ignore[arg-type]

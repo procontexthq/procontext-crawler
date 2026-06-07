@@ -95,8 +95,8 @@ The minimum to be useful. Crawl a URL, get Markdown files on disk.
 **Endpoints**: `/crawl` (POST/GET/DELETE), `/markdown`, `/content`, `/links`
 
 **Features**:
-- Single-URL crawl with link discovery (HTML `<a>` tags)
-- llms.txt URL discovery mode (`source: "llms_txt"`)
+- Single-URL crawl with automatic HTML/text-index discovery (`source: "auto"`)
+- Explicit HTML-link discovery (`source: "links"`) and llms.txt/text-index discovery (`source: "llms_txt"`)
 - Configurable depth (default: 1000) and page limit (default: 10)
 - URL include/exclude patterns with wildcard matching
 - Subdomain and external link controls
@@ -261,7 +261,7 @@ For fetching gated or authenticated content. Apply to both static and rendered f
 | `url` | string | Yes | — | Starting URL. Can be any webpage or an llms.txt index. |
 | `limit` | integer | No | 10 | Maximum number of pages to crawl. |
 | `depth` | integer | No | 1000 | Maximum link hops from the starting URL. |
-| `source` | string | No | `"links"` | URL discovery strategy. v0.1 accepts `"links"` and `"llms_txt"` only. `"sitemaps"` and `"all"` are v0.2 roadmap values and are rejected in v0.1. |
+| `source` | string | No | `"auto"` | URL discovery strategy. v0.1 accepts `"auto"`, `"links"`, and `"llms_txt"` only. `"sitemaps"` and `"all"` are v0.2 roadmap values and are rejected in v0.1. |
 | `formats` | array | No | `["markdown"]` | Output formats per page: `"markdown"`, `"html"`. `"json"` added in v0.3. |
 | `render` | boolean | No | `false` | Use Playwright for all pages in this crawl. |
 | `goto_options` | object | No | — | Rendering params (see Section 6.2). Apply to all pages when `render: true`. |
@@ -276,10 +276,19 @@ For fetching gated or authenticated content. Apply to both static and rendered f
 
 | Source | Behavior |
 |--------|----------|
-| `"links"` | Parse HTML `<a>` tags from each fetched page to discover new URLs. Default. |
-| `"llms_txt"` | Parse the starting URL as an llms.txt file. Extract all documentation links listed in it. Do not follow HTML links from individual pages. |
+| `"auto"` | Default. Fetch the starting URL once and classify it. HTML pages crawl the original URL and discover children from `<a href>` tags. `llms.txt`, `.txt`, `.md`, `.markdown`, `.rst`, and text-like content types are parsed as URL indexes. Text indexes with URLs crawl only the parsed URLs; text pages with no URLs are stored once as the original page. |
+| `"links"` | Force HTML-link behavior. Crawl the starting URL and parse HTML `<a>` tags from each fetched page to discover new URLs. Plain visible-text URLs are not scanned. |
+| `"llms_txt"` | Force text-index behavior. Fetch the starting URL, parse crawlable URLs from its text, crawl only those parsed URLs, and do not follow links from individual crawled pages. |
 | `"sitemaps"` [v0.2] | Roadmap only. v0.1 rejects this value with `INVALID_INPUT`. |
 | `"all"` [v0.2] | Roadmap only. v0.1 rejects this value with `INVALID_INPUT`. |
+
+**Text-index URL parsing**:
+
+- Extracts inline Markdown links, reference-style links, CommonMark autolinks, embedded HTML `<a href>` links, and bare `http://` / `https://` URLs.
+- Skips fenced code blocks, indented code blocks, and inline code.
+- Resolves relative Markdown and embedded-HTML links against the text document URL.
+- Removes fragments, accepts only `http` and `https` URLs with hostnames, and deduplicates by normalized URL while preserving first-seen order.
+- Cleans trailing prose punctuation from bare URLs without stripping balanced URL parentheses.
 
 **URL pattern matching**:
 
@@ -295,7 +304,7 @@ For fetching gated or authenticated content. Apply to both static and rendered f
 **Processing**:
 
 1. Validate inputs; create job record in DB with status `queued`
-2. Enqueue starting URL; set job status to `running`
+2. Seed the queue according to `source`; set job status to `running`
 3. BFS crawl loop:
    a. Dequeue next URL
    b. Skip if already visited, or if depth exceeds `depth`, or if URL doesn't match include/exclude patterns
@@ -303,7 +312,7 @@ For fetching gated or authenticated content. Apply to both static and rendered f
    d. Extract content in requested formats (Markdown, HTML)
    e. Write content files to disk under `<output_dir>/<job_id>/`
    f. Mark URL as `completed` in DB
-   g. Discover new URLs from the page (per `source` strategy)
+   g. Discover new URLs from the page only when that queue entry permits child discovery
    h. Enqueue newly discovered URLs (that pass pattern filtering and haven't been visited)
    i. Stop if `limit` reached, queue exhausted, job cancelled, or cooperative job timeout expires
 4. Set job status to `completed`, or `cancelled` when stopped by cancellation/timeout
@@ -761,8 +770,8 @@ Crawled content goes to disk as individual files. The database only stores job s
 
 _Trade-off_: File I/O is slower than SQLite reads for serving content via the API. Accepted — the primary consumption path is direct file access, not API polling.
 
-**D3: llms.txt as a URL discovery feature, not the core**
-The `source: "llms_txt"` option treats the starting URL as an llms.txt index and extracts documentation links from it rather than parsing HTML `<a>` tags. This is a first-class feature, but it's one of several URL discovery strategies — the crawler works with any URL. llms.txt is the most reliable discovery method for documentation sites that publish one, because it's a curated list rather than ad-hoc link scraping.
+**D3: Text indexes as a URL discovery feature, not the core**
+The default `source: "auto"` mode detects `llms.txt`, Markdown, and plain-text URL indexes and extracts crawl targets from them rather than parsing HTML `<a>` tags. The explicit `source: "llms_txt"` option forces that text-index behavior. This is a first-class feature, but it remains one of several URL discovery strategies — ordinary HTML pages still work through anchor discovery. Curated text indexes are the most reliable discovery method for documentation sites that publish one, because they avoid ad-hoc link scraping.
 
 **D4: Repository pattern for DB abstraction**
 The database is accessed through a `Repository` protocol (Python Protocol class) with methods like `save_job`, `get_job`, `enqueue_urls`, `mark_url_complete`. The v0.1 implementation uses SQLite. The abstraction exists from day one so that business logic never imports `aiosqlite` directly — swapping to Postgres, DynamoDB, or any other backend requires only a new `Repository` implementation.

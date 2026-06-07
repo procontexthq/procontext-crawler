@@ -133,7 +133,7 @@ Content-Type: application/json
 | `url` | string | Yes | — | Starting URL |
 | `limit` | integer | No | 10 | Max pages to crawl (min: 1) |
 | `depth` | integer | No | 1000 | Max link hops from starting URL (min: 0) |
-| `source` | string | No | `"links"` | URL discovery: `"links"` or `"llms_txt"`. `"sitemaps"` and `"all"` are v0.2 roadmap values and return `INVALID_INPUT` in v0.1. |
+| `source` | string | No | `"auto"` | URL discovery: `"auto"`, `"links"`, or `"llms_txt"`. `"sitemaps"` and `"all"` are v0.2 roadmap values and return `INVALID_INPUT` in v0.1. |
 | `formats` | string[] | No | `["markdown"]` | Output formats: `"markdown"`, `"html"` |
 | `render` | boolean | No | `false` | Use Playwright rendering |
 | `goto_options.wait_until` | string | No | `"load"` | Page load strategy (render only) |
@@ -144,6 +144,8 @@ Content-Type: application/json
 | `options.exclude_patterns` | string[] | No | — | Wildcard URL exclude patterns |
 | `options.include_subdomains` | boolean | No | `false` | Follow subdomain links |
 | `options.include_external_links` | boolean | No | `false` | Follow cross-domain links |
+
+`source="auto"` fetches the starting URL once for classification. HTML pages crawl the original URL and discover children from `<a href>` tags. `llms.txt`, `.txt`, `.md`, `.markdown`, `.rst`, and text-like content types are parsed as URL indexes; parsed URLs are crawled without child discovery. Text pages with no URLs are stored once as the original page.
 
 The server-level `Settings.job_timeout` applies to every crawl job. Timeout enforcement is cooperative: the engine checks before and after each URL, does not abort an in-flight fetch/render, and finalises a timed-out job as `cancelled` after cancelling queued URLs and writing `manifest.json`.
 
@@ -872,7 +874,7 @@ result = await crawler.crawl(
     url="https://docs.pydantic.dev/llms.txt",
     limit=50,                          # default: 10
     depth=1000,                        # default: 1000
-    source="llms_txt",                 # default: "links"
+    source="llms_txt",                 # default: "auto"
     formats=["markdown"],              # default: ["markdown"]
     render=False,                      # default: False
     options={                          # default: no filtering
@@ -900,7 +902,7 @@ async def crawl(
     *,
     limit: int = 10,
     depth: int = 1000,
-    source: Literal["links", "llms_txt"] = "links",
+    source: Literal["auto", "links", "llms_txt"] = "auto",
     formats: list[Literal["markdown", "html"]] | None = None,
     render: bool = False,
     goto_options: dict | None = None,
@@ -1028,7 +1030,7 @@ Start a multi-page crawl and save results to disk.
 | `<url>` | positional | required | Starting URL |
 | `--limit N` | int | 10 | Max pages to crawl |
 | `--depth N` | int | 1000 | Max link depth |
-| `--source MODE` | str | `links` | Discovery: `links`, `llms_txt` |
+| `--source MODE` | str | `auto` | Discovery: `auto`, `links`, `llms_txt` |
 | `--format FMT` | str | `markdown` | Output format (repeatable) |
 | `--render` | flag | false | Enable Playwright |
 | `--include PATTERN` | str | — | Include pattern (repeatable) |

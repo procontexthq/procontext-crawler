@@ -35,7 +35,7 @@ class TestParser:
         assert args.url == "https://example.com"
         assert args.limit == 10
         assert args.depth == 1000
-        assert args.source == "links"
+        assert args.source == "auto"
         assert args.format is None  # None means use default ["markdown"]
         assert args.render is False
         assert args.include is None
@@ -88,6 +88,11 @@ class TestParser:
         parser = _build_parser()
         args = parser.parse_args(["crawl", "https://example.com"])
         assert args.format is None
+
+    def test_source_auto_explicit(self) -> None:
+        parser = _build_parser()
+        args = parser.parse_args(["crawl", "https://example.com", "--source", "auto"])
+        assert args.source == "auto"
 
     def test_format_repeatable(self) -> None:
         parser = _build_parser()
@@ -193,7 +198,7 @@ class TestCrawlCommand:
             "https://example.com",
             limit=10,
             depth=1000,
-            source="links",
+            source="auto",
             formats=["markdown"],
             render=False,
             options=None,

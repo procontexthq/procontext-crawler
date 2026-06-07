@@ -3,18 +3,33 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from typing import TYPE_CHECKING, Any, Literal
+from urllib.parse import urljoin, urlparse
 
-from proctx_crawler.core.url_utils import is_same_domain, is_subdomain, matches_patterns
+from bs4 import BeautifulSoup
+from markdown_it import MarkdownIt
+
+from proctx_crawler.core.url_utils import (
+    is_same_domain,
+    is_subdomain,
+    matches_patterns,
+    normalise_url,
+)
 from proctx_crawler.extractors.links import extract_links
 
-_MARKDOWN_LINK_RE = re.compile(r"\[([^\]]*)\]\((https?://[^)]+)\)")
-_BARE_URL_RE = re.compile(r"https?://[^\s>)\]]+")
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+SourceMode = Literal["auto", "links", "llms_txt"]
+
+_BARE_URL_RE = re.compile(r"https?://[^\s<>'\"]+")
+_ALLOWED_SCHEMES = frozenset({"http", "https"})
+_MARKDOWN = MarkdownIt("commonmark")
 
 
 async def discover_seed_urls(
     url: str,
-    source: Literal["links", "llms_txt"],
+    source: SourceMode,
     html: str | None = None,
 ) -> list[str]:
     """Discover seed URLs based on the source strategy.
@@ -22,7 +37,7 @@ async def discover_seed_urls(
     For 'links': return [url] (the starting URL itself is the only seed)
     For 'llms_txt': parse the HTML content as llms.txt format, extract all URLs
     """
-    if source == "links":
+    if source in {"auto", "links"}:
         return [url]
 
     if source == "llms_txt":
@@ -35,37 +50,96 @@ async def discover_seed_urls(
 
 
 def parse_llms_txt(text: str) -> list[str]:
-    """Parse an llms.txt file and extract all HTTP(S) URLs.
+    """Parse an llms.txt file and extract all HTTP(S) URLs."""
+    return extract_text_urls(text, base_url=None)
 
-    Two extraction strategies:
-    1. Markdown links: [text](url) -- extract URL from parentheses
-    2. Bare URLs: lines containing https://... or http://... -- extract URL
 
-    The parser is intentionally lenient. Section headers and descriptive text are ignored.
-    All extracted URLs are deduplicated while preserving order.
-    """
+def extract_text_urls(text: str, base_url: str | None = None) -> list[str]:
+    """Extract crawlable URLs from Markdown/plain text while avoiding code blocks."""
     urls: list[str] = []
     seen: set[str] = set()
+    env: dict[str, Any] = {}
+    tokens = _MARKDOWN.parse(text, env)
 
-    # First pass: extract markdown link URLs
-    markdown_urls: set[str] = set()
-    for match in _MARKDOWN_LINK_RE.finditer(text):
-        url = match.group(2)
-        markdown_urls.add(url)
-        if url not in seen:
-            seen.add(url)
-            urls.append(url)
+    def add_candidate(candidate: str, *, allow_relative: bool = False) -> None:
+        cleaned = _clean_url_candidate(candidate)
+        if not cleaned:
+            return
+        resolved = urljoin(base_url, cleaned) if allow_relative and base_url else cleaned
+        parsed = urlparse(resolved)
+        if parsed.scheme not in _ALLOWED_SCHEMES or not parsed.hostname:
+            return
+        fragmentless = parsed._replace(fragment="").geturl()
+        normalised = normalise_url(fragmentless)
+        if normalised not in seen:
+            seen.add(normalised)
+            urls.append(fragmentless)
 
-    # Second pass: extract bare URLs not already captured via markdown links
-    for match in _BARE_URL_RE.finditer(text):
-        url = match.group(0)
-        if url not in seen:
-            # Check this bare URL wasn't part of a markdown link already extracted
-            # (the regex may match a substring of a markdown link URL)
-            seen.add(url)
-            urls.append(url)
+    references = env.get("references")
+    if isinstance(references, dict):
+        for reference in references.values():
+            if isinstance(reference, dict):
+                href = reference.get("href")
+                if isinstance(href, str):
+                    add_candidate(href, allow_relative=True)
+
+    for token in tokens:
+        if token.type == "html_block":
+            _extract_html_url_candidates(token.content, add_candidate)
+            continue
+
+        if token.type != "inline" or token.children is None:
+            continue
+
+        for child in token.children:
+            if child.type == "link_open":
+                href = child.attrGet("href")
+                if isinstance(href, str):
+                    add_candidate(href, allow_relative=True)
+            elif child.type == "html_inline":
+                _extract_html_url_candidates(child.content, add_candidate)
+            elif child.type == "text":
+                for match in _BARE_URL_RE.finditer(child.content):
+                    add_candidate(match.group(0))
 
     return urls
+
+
+def _extract_html_url_candidates(html: str, add_candidate: Callable[..., None]) -> None:
+    """Extract href values from HTML snippets embedded in Markdown."""
+    soup = BeautifulSoup(html, "html.parser")
+    for anchor in soup.find_all("a", href=True):
+        add_candidate(str(anchor["href"]), allow_relative=True)
+
+
+def _clean_url_candidate(candidate: str) -> str:
+    """Strip punctuation commonly adjacent to prose URLs."""
+    value = candidate.strip()
+    while value and value[-1] in ".,;:!?":
+        value = value[:-1]
+
+    bracket_pairs = {"(": ")", "[": "]", "{": "}"}
+    opening = set(bracket_pairs)
+    closing = set(bracket_pairs.values())
+    reverse_pairs = {close: open_ for open_, close in bracket_pairs.items()}
+
+    while value and value[-1] in closing:
+        close_char = value[-1]
+        open_char = reverse_pairs[close_char]
+        if value.count(close_char) > value.count(open_char):
+            value = value[:-1]
+        else:
+            break
+
+    while value and value[0] in opening:
+        open_char = value[0]
+        close_char = bracket_pairs[open_char]
+        if value.count(open_char) > value.count(close_char):
+            value = value[1:]
+        else:
+            break
+
+    return value
 
 
 def discover_page_links(

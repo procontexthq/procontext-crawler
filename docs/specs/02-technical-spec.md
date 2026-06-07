@@ -153,7 +153,7 @@ POST /markdown {"url": "https://docs.pydantic.dev/concepts/models"}
 ### 1.3 Request Flow: Multi-Page Crawl
 
 ```
-POST /crawl {"url": "https://docs.pydantic.dev/llms.txt", "source": "llms_txt", "limit": 50}
+POST /crawl {"url": "https://docs.pydantic.dev/llms.txt", "limit": 50}
   │
   ├─ Validate input
   ├─ Create job record (status: queued) in Repository
@@ -278,7 +278,7 @@ class CrawlConfig(BaseModel):
     url: str
     limit: int = Field(default=10, ge=1)
     depth: int = Field(default=1000, ge=0)
-    source: Literal["links", "llms_txt"] = "links"
+    source: Literal["auto", "links", "llms_txt"] = "auto"
     formats: list[Literal["markdown", "html"]] = ["markdown"]
     render: bool = False
     goto_options: GotoOptions | None = None
@@ -415,13 +415,14 @@ async def run_crawl(
     deadline = monotonic() + job_timeout if job_timeout is not None else None
     timed_out = False
 
-    # Seed the queue
-    seed_urls = await discover_seed_urls(job.config)
-    for url in seed_urls:
-        if should_crawl(url, job.config, visited, depth=0):
-            queue.append(QueueEntry(url=url, depth=0))
-            visited.add(normalise_url(url))
-            await repo.enqueue_url(job.id, url, depth=0)
+    # Seed the queue. Each QueueEntry carries discover_children so text-index
+    # seeds can be crawled without recursively scanning their pages.
+    seed_entries = await discover_seed_entries(job.config)
+    for entry in seed_entries:
+        if should_crawl(entry.url, job.config, visited, depth=entry.depth):
+            queue.append(entry)
+            visited.add(normalise_url(entry.url))
+            await repo.enqueue_url(job.id, entry.url, depth=entry.depth)
 
     await repo.update_job_status(job.id, JobStatus.RUNNING)
 
@@ -443,14 +444,18 @@ async def run_crawl(
             await repo.mark_url_completed(job.id, entry.url, page.metadata)
             completed_count += 1
 
-            # Discover and enqueue new URLs
-            if job.config.source != "llms_txt":  # llms_txt only uses seed URLs
+            # Discover and enqueue new URLs only for queue entries that allow it.
+            if entry.discover_children:
                 new_urls = await discover_urls(page, job.config.source)
                 for new_url in new_urls:
                     normalised = normalise_url(new_url)
                     new_depth = entry.depth + 1
                     if should_crawl(new_url, job.config, visited, new_depth):
-                        queue.append(QueueEntry(url=new_url, depth=new_depth))
+                        queue.append(QueueEntry(
+                            url=new_url,
+                            depth=new_depth,
+                            discover_children=True,
+                        ))
                         visited.add(normalised)
                         await repo.enqueue_url(job.id, new_url, depth=new_depth)
 
@@ -481,17 +486,17 @@ async def run_crawl(
 
 | Source | Seed URLs | Per-Page Discovery |
 |--------|-----------|--------------------|
+| `"auto"` | Classify the starting URL after a static prefetch. HTML starts with the original URL; text indexes start with parsed URLs, or the original URL when no URLs are found. | HTML entries parse `<a href>` from crawled pages. Text-index-seeded entries do not discover children. |
 | `"links"` | Starting URL only | Parse `<a href>` from each crawled page |
-| `"llms_txt"` | Parse starting URL as llms.txt, extract all links | None — only seed URLs are crawled |
+| `"llms_txt"` | Parse starting URL as a text URL index, extract all crawlable links | None — only seed URLs are crawled |
 | `"sitemaps"` [v0.2] | Roadmap only; rejected by v0.1 input validation | None |
 | `"all"` [v0.2] | Roadmap only; rejected by v0.1 input validation | None |
 
-**llms.txt parsing**: The starting URL is fetched and parsed as a plain text file. The parser extracts all HTTP(S) URLs found in the file using two strategies:
+**Auto classification**: `source="auto"` is the public default. The starting URL is fetched once with the static fetcher to classify it. The URL is treated as a text index when the final URL ends with `llms.txt`, `.txt`, `.md`, `.markdown`, or `.rst`, or when `Content-Type` is `text/plain`, `text/markdown`, `text/x-markdown`, or `application/markdown`. It is treated as HTML when `Content-Type` is `text/html` or `application/xhtml+xml`, or when the body clearly looks like HTML. If the classification fetch fails, the original URL is queued so the normal per-URL fetch error path handles it. The static prefetch can be reused for non-rendered HTML and for text pages stored as single pages; rendered HTML pages always fetch through Playwright for page content.
 
-1. **Markdown links**: `[text](url)` or `- [text](url)` — extract the URL from the parentheses
-2. **Bare URLs**: Lines containing `https://...` or `http://...` — extract the URL (terminated by whitespace, `>`, `)`, or end-of-line)
+**Text-index parsing**: The text parser is backed by CommonMark tokenization plus a bare-URL pass. It extracts inline Markdown links, reference-style links, CommonMark autolinks, embedded HTML `<a href>` links, and bare `http://` / `https://` URLs from text tokens.
 
-The parser is intentionally lenient — real-world llms.txt files vary in structure. Section headers and descriptive text are ignored; only URLs are extracted. All extracted URLs become seed entries in the queue at depth 0. Duplicate URLs are deduplicated before enqueuing.
+The parser skips fenced code blocks, indented code blocks, and inline code. Markdown/HTML link targets are resolved relative to the text document URL, fragments are removed, non-HTTP(S) URLs and hostless URLs are rejected, and duplicates are removed by normalized URL while preserving first-seen order. Bare URLs are cleaned for trailing prose punctuation without stripping balanced URL parentheses.
 
 **Link discovery from HTML**: After fetching a page, all `<a href="...">` elements are extracted. Relative URLs are resolved to absolute using the page's base URL. Fragment-only links (`#section`) are discarded. Each discovered URL goes through the pattern matching and domain filtering pipeline before being enqueued.
 
@@ -1392,7 +1397,7 @@ class Crawler:
         *,
         limit: int = 10,
         depth: int = 1000,
-        source: Literal["links", "llms_txt"] = "links",
+        source: Literal["auto", "links", "llms_txt"] = "auto",
         formats: list[str] | None = None,
         render: bool = False,
         **kwargs: Any,
@@ -1474,7 +1479,7 @@ Commands:
 proctx-crawler crawl <url> [options]
   --limit N          Max pages (default: 10)
   --depth N          Max link depth (default: 1000)
-  --source MODE      Discovery: links, llms_txt (default: links)
+  --source MODE      Discovery: auto, links, llms_txt (default: auto)
   --format FMT       Output format: markdown, html (default: markdown; repeatable)
   --render           Enable Playwright rendering
   --include PATTERN  URL include pattern (repeatable)
